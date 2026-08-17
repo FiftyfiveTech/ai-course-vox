@@ -21,9 +21,10 @@ gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 
+# One chained turn: mic -> silero-vad -> whisper-large-v3-turbo -> Llama-3.1-8B -> Kokoro-82M.
+# Needs a working microphone and speakers. First run downloads the Kokoro weights (~350 MB).
 demo:
-	@echo "not implemented yet. make demo must run the system end to end from a clean clone."
-	@exit 1
+	uv run python -m src.loop
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.
