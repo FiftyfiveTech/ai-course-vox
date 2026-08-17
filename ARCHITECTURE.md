@@ -55,18 +55,46 @@ One turn = one VAD segment → STT → NLU → (confirm?) → action → TTS.
 
 ## Latency budget (target: < 2 s end-to-end)
 
-| Stage | Budget | Notes |
-|---|---|---|
-| VAD (end-of-speech detection) | ~100 ms | local; no network hop |
-| STT (`openai/whisper-large-v3-turbo` on Groq) | ~300 ms | Groq free tier; streaming not used |
-| NLU / entity extraction (NVIDIA NIM) | ~500 ms | one structured-output call |
-| Confirmation TTS + user response | not counted | adds one extra turn |
-| Action (internal API) | ~200 ms | internal network |
-| TTS (response) | ~200 ms | local or NIM |
-| **Total (no confirmation)** | **~1.3 s** | well within budget |
-| **Total (with confirmation)** | **2–4 s** | acceptable for write actions |
+**The signed-off budget does not hold.** VOX-002 flagged it and deferred the revision to VOX-003;
+these are the first measured numbers. The budget column is kept as written so the size of the
+miss stays visible rather than being edited away.
 
-Telemetry for every model call is logged via `src/telemetry.py` (cost + latency).
+| Stage | Budget | Measured | Notes |
+|---|---|---|---|
+| VAD (end-of-speech detection) | ~100 ms | **~1100 ms live** (by construction) | `VAD_SILENCE_MS` — the loop holds the turn open this long to see whether the user is done. Not yet measured on a live mic; the constant is the floor. Silero compute is only ~150 ms of it. |
+| STT (`openai/whisper-large-v3-turbo` on Groq) | ~300 ms | **1.7 s / 15.6 s** | n=2, wildly variable on the free tier. The 15.6 s was a cold connection and is in the call log, so it is provider time, not ours. |
+| NLU / entity extraction (NVIDIA NIM) | ~500 ms | **0.60–0.69 s** | reply only. Structured extraction (VOX-019) is not built, so this will grow. |
+| Confirmation TTS + user response | not counted | not built | VOX-020 |
+| Action (internal API) | ~200 ms | not built | — |
+| TTS (response) | ~200 ms | **3.1 s** | warm `hexgrad/Kokoro-82M`, weights preloaded. **15× over budget** and the most stable overrun of the four. |
+| unattributed | — | **~250–540 ms** | opening the output device before the first block. Real, felt, and belongs to no model call — visible only because turns and calls are logged separately. |
+| **Total (no confirmation)** | **~1.3 s** | **5.6 s warm, 20.0 s cold** | `time_to_first_audio`, n=2, fixture-driven |
+| **Total (with confirmation)** | **2–4 s** | not built | — |
+
+Measured on 2026-08-17, two turns driven from `tests/fixtures/hello_testing_voice.mp3` via
+`scripts/turn_from_fixture.py`. **Fixture runs understate the live figure**: frames are pushed as
+fast as the CPU allows, so the ~1.1 s VAD hangover a person actually waits out collapses to ~3 ms.
+A live turn should be read as roughly *measured + 1.1 s*. `source` on each turn record says which
+kind of run produced it. n=2 is not a distribution — VOX-012 re-tunes endpointing on VOX-004's 45
+utterances and is the first chance to quote a spread.
+
+Where the 2 s target has to come from, on this evidence: TTS (3.1 s of a 5.6 s turn) by streaming
+the first chunk to the speaker instead of synthesising the whole reply first, and the ~1.1 s VAD
+hangover. Those two are ~75% of the turn; the model calls are not the problem.
+
+### Telemetry
+
+Two logs, joined by `turn_id`, because they answer different questions:
+
+| | one line per | answers |
+|---|---|---|
+| `runs/calls.jsonl` | model call | what it cost, how long the provider took |
+| `runs/turns.jsonl` | turn | where the turn's wall clock went — `t_vad`, `t_stt`, `t_llm`, `t_tts`, `time_to_first_audio` |
+
+`time_to_first_audio` is measured from the **last frame silero called speech** — not from the
+endpoint decision — through to the moment the output device pulls its first block. The user has
+been waiting since they stopped talking, so the VAD hangover is inside the number, and the
+callback stamp is the first audio rather than the moment playback was queued.
 
 ---
 

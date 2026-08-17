@@ -9,6 +9,9 @@ dependencies = [
     "sounddevice>=0.4.6",   # mic capture + speaker playback (PortAudio)
     "soundfile>=0.12",      # WAV encode for the Groq upload
     "torch>=2.2",           # silero-vad and kokoro both run on it
+    # Resampling a recording to the 16 kHz silero and whisper expect. Only the offline harness
+    # needs it, but it arrives with torch anyway and an undeclared transitive dep is a trap.
+    "torchaudio>=2.2",
     "silero-vad>=5.1",      # snakers4/silero-vad — endpointing
     "kokoro>=0.9",          # hexgrad/Kokoro-82M — local TTS
     # kokoro's phonemizer pip-installs this at first call if it is missing, which would make

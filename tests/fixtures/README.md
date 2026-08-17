@@ -21,8 +21,19 @@ reproduce:
 2. The resulting 1.0 s clip made `whisper-large-v3-turbo` auto-detect **French** and return
    `"Salut !"`, after which the LLM replied in French. STT now pins `language=en`.
 
-`make demo` does not read this file — it is live-mic only. Drive the chain from it with the
-`Endpointer` directly, which is the same decision logic the live loop runs:
+`make demo` does not read this file — it is live-mic only. To drive the whole chain from it,
+including telemetry and playback:
+
+```
+uv run python scripts/turn_from_fixture.py tests/fixtures/hello_testing_voice.mp3
+```
+
+That script goes through `Endpointer`, the same decision logic the live loop runs, and appends a
+turn line to `runs/turns.jsonl`. Read its `t_vad` and `time_to_first_audio` with the caveat in the
+script's docstring: frames arrive as fast as the CPU allows, so the ~1.1 s hangover a live turn
+waits out is missing from them.
+
+For just the endpointing decision:
 
 ```python
 import soundfile as sf, torch, torchaudio
@@ -32,6 +43,6 @@ from src.telemetry import new_turn_id
 
 audio, sr = sf.read("tests/fixtures/hello_testing_voice.mp3", dtype="float32", always_2d=True)
 a16 = torchaudio.functional.resample(torch.from_numpy(audio.mean(axis=1)), sr, SAMPLE_RATE).numpy()
-segment, state = vad.endpoint_frames(vad.frames_from(a16))
-print(state, stt.transcribe(segment, new_turn_id()))
+cap, state = vad.endpoint_frames(vad.frames_from(a16))
+print(state, cap.t_vad_ms, stt.transcribe(cap.segment, new_turn_id()))
 ```
