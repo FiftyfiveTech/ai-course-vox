@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "odoo-board": {
+      "command": "python3",
+      "args": ["${AI_COURSE_KIT}/odoo_board_mcp.py"],
+      "env": {}
+    }
+  }
+}

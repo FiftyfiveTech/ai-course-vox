@@ -1,0 +1,19 @@
+[project]
+name = "ai-course-track"
+version = "0.1.0"
+description = "<TRACK> — FiftyFive AI engineering course"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
