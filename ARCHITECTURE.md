@@ -59,28 +59,33 @@ One turn = one VAD segment → STT → NLU → (confirm?) → action → TTS.
 these are the first measured numbers. The budget column is kept as written so the size of the
 miss stays visible rather than being edited away.
 
-| Stage | Budget | Measured | Notes |
+| Stage | Budget | Measured (n=4) | Notes |
 |---|---|---|---|
-| VAD (end-of-speech detection) | ~100 ms | **~1100 ms live** (by construction) | `VAD_SILENCE_MS` — the loop holds the turn open this long to see whether the user is done. Not yet measured on a live mic; the constant is the floor. Silero compute is only ~150 ms of it. |
-| STT (`openai/whisper-large-v3-turbo` on Groq) | ~300 ms | **1.7 s / 15.6 s** | n=2, wildly variable on the free tier. The 15.6 s was a cold connection and is in the call log, so it is provider time, not ours. |
-| NLU / entity extraction (NVIDIA NIM) | ~500 ms | **0.60–0.69 s** | reply only. Structured extraction (VOX-019) is not built, so this will grow. |
+| VAD (end-of-speech detection) | ~100 ms | **~1100 ms live** (by construction) | `VAD_SILENCE_MS` — the loop holds the turn open this long to see whether the user is done. Not yet measured on a live mic; the constant is the floor. Silero compute is 0.15–0.83 s on top. |
+| STT (`openai/whisper-large-v3-turbo` on Groq) | ~300 ms | **1.0 – 15.6 s** | free tier, wildly variable. The 15.6 s is in the call log too, so it is provider time, not ours. |
+| NLU / entity extraction (NVIDIA NIM) | ~500 ms | **0.53 – 1.22 s** | reply only. Structured extraction (VOX-019) is not built, so this will grow. |
 | Confirmation TTS + user response | not counted | not built | VOX-020 |
 | Action (internal API) | ~200 ms | not built | — |
-| TTS (response) | ~200 ms | **3.1 s** | warm `hexgrad/Kokoro-82M`, weights preloaded. **15× over budget** and the most stable overrun of the four. |
-| unattributed | — | **~250–540 ms** | opening the output device before the first block. Real, felt, and belongs to no model call — visible only because turns and calls are logged separately. |
-| **Total (no confirmation)** | **~1.3 s** | **5.6 s warm, 20.0 s cold** | `time_to_first_audio`, n=2, fixture-driven |
+| TTS (response) | ~200 ms | **3.1 – 12.4 s** | warm `hexgrad/Kokoro-82M`, weights preloaded. **15–60× over budget** and the largest single stage in every one of the four turns. |
+| unattributed | — | **0.25 – 0.84 s** | opening the output device before the first block. Real, felt, and belongs to no model call — visible only because turns and calls are logged separately. |
+| **Total (no confirmation)** | **~1.3 s** | **5.6 – 20.0 s** | `time_to_first_audio`, fixture-driven |
 | **Total (with confirmation)** | **2–4 s** | not built | — |
 
-Measured on 2026-08-17, two turns driven from `tests/fixtures/hello_testing_voice.mp3` via
-`scripts/turn_from_fixture.py`. **Fixture runs understate the live figure**: frames are pushed as
-fast as the CPU allows, so the ~1.1 s VAD hangover a person actually waits out collapses to ~3 ms.
-A live turn should be read as roughly *measured + 1.1 s*. `source` on each turn record says which
-kind of run produced it. n=2 is not a distribution — VOX-012 re-tunes endpointing on VOX-004's 45
-utterances and is the first chance to quote a spread.
+Measured on 2026-08-17: four turns driven from `tests/fixtures/hello_testing_voice.mp3` via
+`scripts/turn_from_fixture.py`, same clip and same machine every time. Two warnings about reading
+this table:
 
-Where the 2 s target has to come from, on this evidence: TTS (3.1 s of a 5.6 s turn) by streaming
-the first chunk to the speaker instead of synthesising the whole reply first, and the ~1.1 s VAD
-hangover. Those two are ~75% of the turn; the model calls are not the problem.
+- **n=4 is a range, not a distribution.** Every stage varies by 2–4× across four runs of identical
+  input, so no single number here is a target to tune against. The variance is the finding. VOX-012
+  re-tunes endpointing on VOX-004's 45 utterances and is the first chance to quote a real spread.
+- **Fixture runs understate the live figure.** Frames are pushed as fast as the CPU allows, so the
+  ~1.1 s VAD hangover a person actually waits out collapses to 3–26 ms. Read a live turn as roughly
+  *measured + 1.1 s*. `source` on each turn record says which kind of run produced it.
+
+Where the 2 s target has to come from, on this evidence: TTS is the largest stage in all four turns,
+so streaming Kokoro's first chunk to the speaker instead of synthesising the whole reply first, and
+then the ~1.1 s VAD hangover. The three model calls are not the problem — and the variance means
+the first job is a stable measurement, not an optimisation.
 
 ### Telemetry
 
