@@ -1,11 +1,12 @@
-.PHONY: setup test gate demo board clean
+.PHONY: setup test gate demo turn board clean
 .DEFAULT_GOAL := help
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
-	@echo "make demo    run the thing end to end"
+	@echo "make demo    run the thing end to end (needs a mic)"
+	@echo "make turn    one instrumented turn from a recording — no mic needed"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 
 setup:
@@ -25,6 +26,13 @@ gate:
 # Needs a working microphone and speakers. First run downloads the Kokoro weights (~350 MB).
 demo:
 	uv run python -m src.loop
+
+# The same chain driven from a recording instead of the mic, so the VOX-003 latency split can be
+# reproduced without a person at the keyboard. Still plays the reply — time_to_first_audio is not
+# measurable without a speaker actually pulling samples. See the script's docstring for why its
+# t_vad is not the live number.
+turn:
+	uv run python scripts/turn_from_fixture.py tests/fixtures/hello_testing_voice.mp3
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.

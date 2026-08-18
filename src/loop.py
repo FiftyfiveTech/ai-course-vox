@@ -3,15 +3,17 @@
     uv run python -m src.loop          one turn, then exit
     uv run python -m src.loop --turns 3
 
-Deliberately one turn by default: VOX-002 is "you speak, you hear a reply". Barge-in is VOX-011
-and the five-field timing breakdown is VOX-003, so neither is here.
+Deliberately one turn by default: VOX-002 is "you speak, you hear a reply". Barge-in is VOX-011,
+so that is not here. The five-field latency split is VOX-003 and it is here from the first
+commit that has a turn to measure — retrofitting timings onto a loop that already runs means
+tuning against numbers nobody watched being taken.
 """
 import argparse
 import sys
 
 from src import audio, nlu, stt, tts, vad
 from src.config import CONSENT_NOTICE, LLM, STT, TTS
-from src.telemetry import CALLS_LOG, new_turn_id
+from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
 
 
 def one_turn():
@@ -19,25 +21,43 @@ def one_turn():
     turn_id = new_turn_id()
     print(f"\n--- turn {turn_id} ---")
 
-    segment = vad.listen()
-    if segment is None:
-        print("nothing heard — stopping.")
-        return False
+    with turn_timer(turn_id, source="mic") as turn:
+        cap = vad.listen()
+        if cap is None:
+            print("nothing heard — stopping.")
+            return False
+        turn.vad(cap)
 
-    transcript = stt.transcribe(segment, turn_id)
-    print(f"you said : {transcript!r}")
-    if not transcript:
-        # Whisper returning empty on real audio is a provider problem, not a quiet user.
-        print("empty transcript from STT — not calling the LLM.", file=sys.stderr)
-        return False
+        with turn.stage("stt"):
+            transcript = stt.transcribe(cap.segment, turn_id)
+        print(f"you said : {transcript!r}")
+        if not transcript:
+            # Whisper returning empty on real audio is a provider problem, not a quiet user.
+            print("empty transcript from STT — not calling the LLM.", file=sys.stderr)
+            return False
 
-    answer = nlu.reply(transcript, turn_id)
-    print(f"vox says : {answer!r}")
+        with turn.stage("llm"):
+            answer = nlu.reply(transcript, turn_id)
+        print(f"vox says : {answer!r}")
 
-    speech = tts.synthesize(answer, turn_id)
-    print("speaking…", flush=True)
-    audio.play(speech)
+        with turn.stage("tts"):
+            speech = tts.synthesize(answer, turn_id)
+
+        print("speaking…", flush=True)
+        audio.play(speech, on_first_audio=turn.first_audio)
+
+    print("  " + report(turn.written))
     return True
+
+
+def report(rec):
+    """The line a human reads. The JSONL line is the record; this is so you see it happen."""
+    def ms(key):
+        v = rec.get(key)
+        return f"{v:.0f}ms" if v is not None else "n/a"
+
+    return (f"vad {ms('t_vad_ms')} + stt {ms('t_stt_ms')} + llm {ms('t_llm_ms')} + "
+            f"tts {ms('t_tts_ms')}  ->  time_to_first_audio {ms('time_to_first_audio_ms')}")
 
 
 def main():
@@ -65,7 +85,9 @@ def main():
             break
         spoken += 1
 
-    print(f"\n{spoken} turn(s) completed. Call log: {CALLS_LOG}")
+    print(f"\n{spoken} turn(s) completed.")
+    print(f"  calls: {CALLS_LOG}")
+    print(f"  turns: {TURNS_LOG}")
     return 0 if spoken else 1
 
 

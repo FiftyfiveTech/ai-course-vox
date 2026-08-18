@@ -1,8 +1,13 @@
 """The shared cost/latency logger. Every model call goes through this — no exceptions.
 
-Deliberately minimal: one JSONL line per *model call*. The five-field per-turn breakdown
-(t_vad, t_stt, t_llm, t_tts, time_to_first_audio) is VOX-003's deliverable and is built on
-top of these records rather than replacing them.
+Two logs, deliberately not merged:
+
+  runs/calls.jsonl   one line per *model call* — what it cost and how long the provider took.
+  runs/turns.jsonl   one line per *turn* — the five-field latency split (VOX-003).
+
+They answer different questions. A call record cannot tell you where a turn's wall clock went,
+because the gaps between calls (endpointing hangover, encoding, handing samples to the device)
+belong to no call. A turn record cannot tell you which provider was slow. `turn_id` joins them.
 
 Cost is logged as 0.0 with the tier that justifies it. A non-zero number here means the zero
 spend constraint has been broken and the run should stop.
@@ -15,6 +20,7 @@ from contextlib import contextmanager
 from src.config import RUNS_DIR
 
 CALLS_LOG = RUNS_DIR / "calls.jsonl"
+TURNS_LOG = RUNS_DIR / "turns.jsonl"
 
 # Free-tier endpoints and local weights. Anything not on this list is a STOP-and-ask.
 FREE_TIERS = {"groq": "free-tier", "nvidia-nim": "free-tier", "local": "local-weights"}
@@ -60,7 +66,104 @@ def log_call(stage, arm, turn_id, **extra):
         _append(record)
 
 
-def _append(record):
+def _append(record, path=CALLS_LOG):
     RUNS_DIR.mkdir(exist_ok=True)
-    with CALLS_LOG.open("a", encoding="utf-8") as f:
+    with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+
+
+# --- per-turn latency split (VOX-003) --------------------------------------------------------
+
+STAGES = ("vad", "stt", "llm", "tts")
+
+# The five fields the ticket asks for, in the order a turn produces them. A single total is
+# useless — which of these moved is the whole question, so the record always carries all five
+# and writes null rather than omitting one, so a missing measurement cannot read as a fast stage.
+TURN_FIELDS = tuple(f"t_{s}_ms" for s in STAGES) + ("time_to_first_audio_ms",)
+
+
+class TurnTimer:
+    """Times one turn and writes a single line to runs/turns.jsonl.
+
+    The clock that matters starts when the user stops talking, not when the endpointer notices:
+    time_to_first_audio is measured from `Capture.speech_end_t` through to the moment the output
+    device pulls its first block. So it contains t_vad's hangover, the three model calls, and the
+    glue between them — if the five stage numbers do not roughly add up to it, the gap is real
+    work nobody has attributed yet, which is the point of logging both.
+    """
+
+    def __init__(self, turn_id, source="mic"):
+        self.turn_id = turn_id
+        self.source = source              # "mic" for a live turn, else the file it was driven from
+        self.ms = dict.fromkeys(STAGES)
+        self.speech_end_t = None
+        self.first_audio_t = None
+        self.extra = {}
+        self.error = None
+        self.written = None               # the record that reached disk, so prints cannot drift
+
+    def vad(self, capture):
+        """Adopt the endpointer's marks: t_vad, and the origin the whole turn is measured from."""
+        self.speech_end_t = capture.speech_end_t
+        self.ms["vad"] = capture.t_vad_ms
+        self.extra["vad_infer_ms"] = capture.infer_ms
+        self.extra["speech_s"] = round(capture.spoken_s, 3)
+
+    @contextmanager
+    def stage(self, name):
+        """Time one stage as the loop experiences it — the call plus its glue, not just the call.
+
+        This is deliberately wider than the matching calls.jsonl record. The difference between
+        the two is encoding, parsing and waiting, which is latency the user feels and no provider
+        will report.
+        """
+        if name not in self.ms:
+            raise ValueError(f"unknown stage {name!r} — expected one of {STAGES}")
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.ms[name] = round((time.perf_counter() - t0) * 1000, 1)
+
+    def first_audio(self):
+        """Stamp the first block reaching the speaker. Idempotent — the callback fires per block."""
+        if self.first_audio_t is None:
+            self.first_audio_t = time.perf_counter()
+
+    def record(self):
+        ttfa = None
+        if self.speech_end_t is not None and self.first_audio_t is not None:
+            ttfa = round((self.first_audio_t - self.speech_end_t) * 1000, 1)
+        measured = [self.ms[s] for s in STAGES if self.ms[s] is not None]
+        return {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "turn_id": self.turn_id,
+            "source": self.source,
+            **{f"t_{s}_ms": self.ms[s] for s in STAGES},
+            "time_to_first_audio_ms": ttfa,
+            "stage_sum_ms": round(sum(measured), 1) if measured else None,
+            "ok": self.error is None and None not in self.ms.values() and ttfa is not None,
+            **({"error": self.error} if self.error else {}),
+            **self.extra,
+        }
+
+    def write(self):
+        """Append the turn line. -> the record, or None if no turn ever started."""
+        if self.speech_end_t is None:
+            return None      # the mic stayed quiet; there is no turn to describe
+        self.written = self.record()
+        _append(self.written, TURNS_LOG)
+        return self.written
+
+
+@contextmanager
+def turn_timer(turn_id, source="mic"):
+    """One turn's timings, written even if the turn raises — a failed turn still has a latency."""
+    t = TurnTimer(turn_id, source)
+    try:
+        yield t
+    except Exception as e:
+        t.error = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        t.write()

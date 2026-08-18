@@ -9,9 +9,11 @@ recording — which is how it gets tested without a person in the room. `listen(
 part that touches the mic, and it stays the loop's single entry point.
 
 Not logged through telemetry.log_call: silero runs locally per frame, so a record per inference
-would be thousands of lines a turn. VOX-003 times this stage as t_vad at the turn level.
+would be thousands of lines a turn. VOX-003 times this stage as t_vad at the turn level, from
+the marks `Capture` carries out of here.
 """
 import sys
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -26,7 +28,7 @@ MS_PER_FRAME = VAD_FRAME / SAMPLE_RATE * 1000  # 32 ms
 # What Endpointer.push returns, so a caller can react without reading private state.
 WAITING = "waiting"    # no speech yet
 SPEAKING = "speaking"  # inside an utterance
-DONE = "done"          # utterance complete — call .segment()
+DONE = "done"          # utterance complete — call .capture()
 TOO_SHORT = "short"    # a cough, not a turn; the endpointer has rearmed itself
 
 _model = None
@@ -39,6 +41,37 @@ def _vad_model():
     return _model
 
 
+class Capture:
+    """One endpointed utterance, plus the two marks the turn timer needs to place it in time.
+
+    `speech_end_t` is when the last frame that silero called speech was processed — as close as
+    this stage gets to "the user stopped talking". `endpointed_t` is when the endpointer said so.
+    Everything downstream is waiting on the second mark, but the user has been waiting since the
+    first, which is why time_to_first_audio is measured from `speech_end_t` and not from DONE.
+    """
+
+    def __init__(self, segment, speech_end_t, endpointed_t, spoken_s, infer_ms):
+        self.segment = segment
+        self.speech_end_t = speech_end_t
+        self.endpointed_t = endpointed_t
+        self.spoken_s = spoken_s
+        self.infer_ms = infer_ms          # silero compute only, no waiting
+
+    @property
+    def t_vad_ms(self):
+        """The delay endpointing adds before STT may start.
+
+        Live, this is dominated by the VAD_SILENCE_MS hangover — the loop is holding the turn
+        open waiting to see whether the user is finished. Driven from a recording, frames arrive
+        as fast as the CPU can push them, so the same subtraction yields silero compute instead.
+        Both are true of their run; `source` on the turn record says which one you are reading.
+        """
+        return round((self.endpointed_t - self.speech_end_t) * 1000, 1)
+
+    def __len__(self):
+        return len(self.segment)
+
+
 class Endpointer:
     """Frame-by-frame end-of-utterance detection. One instance per turn."""
 
@@ -47,19 +80,25 @@ class Endpointer:
         self.model.reset_states()
         self._reset()
         self.waited_ms = 0.0
+        self.infer_ms = 0.0
 
     def _reset(self):
         self.frames = []
         self.speech_frames = 0
         self.silence_ms = 0.0
         self.started = False
+        self.last_speech_t = None
+        self.done_t = None
 
     def push(self, frame):
         """Feed exactly VAD_FRAME samples of float32 mono at 16 kHz. -> one of the states above."""
         if len(frame) != VAD_FRAME:
             raise ValueError(f"silero needs exactly {VAD_FRAME} samples, got {len(frame)}")
 
+        t0 = time.perf_counter()
         prob = self.model(torch.from_numpy(frame), SAMPLE_RATE).item()
+        now = time.perf_counter()
+        self.infer_ms += (now - t0) * 1000
         is_speech = prob >= VAD_SPEECH_THRESHOLD
 
         if not self.started:
@@ -69,17 +108,20 @@ class Endpointer:
             self.started = True
             self.frames.append(frame)
             self.speech_frames = 1
+            self.last_speech_t = now
             return SPEAKING
 
         self.frames.append(frame)
         if is_speech:
             self.speech_frames += 1
             self.silence_ms = 0.0
+            self.last_speech_t = now
         else:
             self.silence_ms += MS_PER_FRAME
 
         if self.silence_ms >= VAD_SILENCE_MS:
             if self.speech_frames * MS_PER_FRAME >= VAD_MIN_SPEECH_MS:
+                self.done_t = now
                 return DONE
             # Too short to be a turn — a cough or a door. Rearm rather than transcribe it.
             self._reset()
@@ -87,6 +129,7 @@ class Endpointer:
             return TOO_SHORT
 
         if len(self.frames) * MS_PER_FRAME >= VAD_MAX_UTTERANCE_MS:
+            self.done_t = now
             return DONE
 
         return SPEAKING
@@ -94,6 +137,7 @@ class Endpointer:
     def flush(self):
         """End the utterance at end-of-audio. -> DONE if enough speech was collected."""
         if self.started and self.speech_frames * MS_PER_FRAME >= VAD_MIN_SPEECH_MS:
+            self.done_t = time.perf_counter()
             return DONE
         return WAITING
 
@@ -106,9 +150,14 @@ class Endpointer:
     def spoken_s(self):
         return self.speech_frames * MS_PER_FRAME / 1000
 
+    def capture(self):
+        """The finished utterance with its timing marks. Call once push() returned DONE."""
+        return Capture(self.segment(), self.last_speech_t, self.done_t or time.perf_counter(),
+                       self.spoken_s(), round(self.infer_ms, 1))
+
 
 def listen(max_wait_s=30):
-    """Block until the user speaks and stops. -> float32 mono array at 16 kHz, or None.
+    """Block until the user speaks and stops. -> Capture, or None.
 
     Returns None if nothing was said within max_wait_s, so the caller can exit cleanly instead
     of hanging on a muted mic.
@@ -135,23 +184,23 @@ def listen(max_wait_s=30):
             elif state == WAITING and ep.waited_ms >= max_wait_ms:
                 return None
 
-    segment = ep.segment()
-    print(f"  endpointed: {len(segment) / SAMPLE_RATE:.2f}s of audio "
-          f"({ep.spoken_s():.2f}s of speech)", flush=True)
-    return segment
+    cap = ep.capture()
+    print(f"  endpointed: {len(cap) / SAMPLE_RATE:.2f}s of audio "
+          f"({cap.spoken_s:.2f}s of speech, t_vad {cap.t_vad_ms:.0f}ms)", flush=True)
+    return cap
 
 
 def endpoint_frames(frames, model=None):
     """Drive the same Endpointer from an iterable of frames. Used to test the decision offline.
 
-    -> (segment, state). Not part of the live path; `listen()` is what `make demo` calls.
+    -> (Capture, state). Not part of the live path; `listen()` is what `make demo` calls.
     """
     ep = Endpointer(model)
     for frame in frames:
         if ep.push(frame) == DONE:
-            return ep.segment(), DONE
+            return ep.capture(), DONE
     state = ep.flush()
-    return (ep.segment() if state == DONE else None), state
+    return (ep.capture() if state == DONE else None), state
 
 
 def frames_from(audio):

@@ -28,13 +28,17 @@ other person as a collaborator with push access.
 
 ## Deliberately missing
 
-Two files are absent because they are Week 0 tasks, not scaffolding:
+One file is absent because it is a Week 0 task, not scaffolding:
 
 - `tests/gates/test_no_leakage.py` — asserts `evals/dev ∩ evals/heldout = ∅` by content hash
   (task **0.7**). Until it exists, the blind-labelling rule is unenforced.
-- `src/telemetry.py` — the shared cost/latency logger every model call goes through (task **0.8**).
 
-Write them. Do not import them from somewhere else.
+Write it. Do not import it from somewhere else.
+
+`src/telemetry.py` (task **0.8**) is now written: every model call goes through it, and it emits
+two logs joined by `turn_id` — `runs/calls.jsonl` (one line per model call, cost and provider
+latency) and `runs/turns.jsonl` (one line per turn, the five-field latency split). See the
+telemetry section of `ARCHITECTURE.md`.
 
 ## Rules that live in this repo
 
