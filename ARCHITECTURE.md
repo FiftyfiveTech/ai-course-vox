@@ -108,16 +108,20 @@ Maximum 2 re-asks before the action is aborted and logged.
 
 ```
 src/
+  config.py        — model registry (HF repo id -> provider) + endpointing constants
   telemetry.py     — shared cost/latency logger; every model call goes through this
-  vad.py           — voice activity detection (local)
+  vad.py           — endpointing via snakers4/silero-vad (local)
   stt.py           — speech-to-text via openai/whisper-large-v3-turbo (Groq)
-  nlu.py           — entity extraction; calls LLM with structured output
-  confirm.py       — confirmation flow logic
-  actions.py       — tool/API calls (read and write)
-  tts.py           — text-to-speech
+  nlu.py           — transcript -> spoken reply; structured extraction lands in VOX-019
+  audio.py         — speaker playback, kept apart from synthesis so VOX-011 can interrupt it
+  loop.py          — one chained turn; `make demo`
+  confirm.py       — confirmation flow logic (VOX-020, not yet written)
+  actions.py       — tool/API calls (read and write) (not yet written)
+  tts.py           — text-to-speech via hexgrad/Kokoro-82M (local)
 
 prompts/
-  extract_v1.md    — NLU prompt (versioned; never inline)
+  reply_v1.md      — spoken-reply prompt (versioned; never inline)
+  extract_v1.md    — entity-extraction prompt (VOX-019, not yet written)
 
 schemas/
   intent.py        — Pydantic models for structured NLU output
@@ -137,20 +141,30 @@ tests/
 
 | Role | HF repo id | Runs on |
 |---|---|---|
+| VAD / endpointing | `snakers4/silero-vad` | local |
 | STT | `openai/whisper-large-v3-turbo` | Groq free tier |
-| NLU / entity extraction | TBD (e.g. `meta-llama/Llama-3.1-8B-Instruct`) | NVIDIA NIM free tier |
-| TTS | TBD (e.g. local `espnet/kan-bayashi_ljspeech_vits`) | local / Ollama |
+| NLU / reply | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier |
+| TTS | `hexgrad/Kokoro-82M` | local |
 
-Provider = where it runs. The model id is the HF repo id, not the provider name.
+Provider = where it runs. The model id is the HF repo id, not the provider name. The mapping from
+repo id to each provider's own model string lives only in `src/config.py`.
+
+VOX-006 replaces this fixed table with arms selectable by flag; until then Phase 0 pins one arm
+per stage so a measured number always has an unambiguous model behind it.
 
 ---
 
 ## Open questions (for sign-off session)
 
-1. Which NLU model on NVIDIA NIM free tier? (Llama-3.1-8B vs 3.3-70B — latency vs accuracy)
-2. TTS: local `espnet` or NIM? Local is zero-cost but voice quality is lower.
-3. VAD library: `silero-vad` (local) vs WebRTC VAD?
-4. Confirmation intent labels: finalise the affirmative / negative word list.
+1. ~~Which NLU model on NVIDIA NIM free tier?~~ **Settled by the VOX-002 ticket:**
+   `meta-llama/Llama-3.1-8B-Instruct`. Revisit against 3.3-70B under VOX-013 with measurements.
+2. ~~TTS: local `espnet` or NIM?~~ **Settled by the VOX-002 ticket:** `hexgrad/Kokoro-82M`,
+   local. (This doc originally proposed `espnet/kan-bayashi_ljspeech_vits`; the ticket names
+   Kokoro, so the ticket wins.)
+3. ~~VAD library: `silero-vad` vs WebRTC VAD?~~ **Settled by the VOX-002 ticket:** `silero-vad`.
+   Its thresholds become a config file under VOX-012.
+4. Confirmation intent labels: finalise the affirmative / negative word list. **Still open** —
+   needed for VOX-020, not for the Phase-0 loop.
 
 ---
 
