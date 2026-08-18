@@ -14,6 +14,7 @@ import httpx
 import numpy as np
 import soundfile as sf
 
+from src import errors
 from src.config import SAMPLE_RATE, STT_LANGUAGE
 
 _loaded = {}   # arm.id -> the loaded local model, so weights load once per process
@@ -36,7 +37,7 @@ def openai_audio(arm, segment, rec, timeout=30):
               "temperature": "0", "language": STT_LANGUAGE},
         timeout=timeout,
     )
-    r.raise_for_status()
+    errors.check(r, arm, rec)
     text = (r.json().get("text") or "").strip()
     rec["chars"] = len(text)
     return text

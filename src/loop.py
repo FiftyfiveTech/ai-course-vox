@@ -18,6 +18,7 @@ import sys
 
 from src import arms, audio, nlu, vad
 from src.config import CONSENT_NOTICE
+from src.errors import RateLimited
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
 
 
@@ -104,7 +105,14 @@ def main():
 
     spoken = 0
     for _ in range(args.turns):
-        heard, keep_going = one_turn(chosen)
+        try:
+            heard, keep_going = one_turn(chosen)
+        except RateLimited as e:
+            # Caught here and not inside the turn: a turn cannot decide the session is over, and
+            # the wait is longer than a turn anyway. The turn record already carries the error,
+            # written on the way out — this is so the user reads a sentence, not a traceback.
+            print(f"\nRATE LIMITED — {e}", file=sys.stderr)
+            break
         spoken += 1 if heard else 0
         if not keep_going:
             break

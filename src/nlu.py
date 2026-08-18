@@ -13,6 +13,7 @@ import re
 
 import httpx
 
+from src import errors
 from src.config import PROMPTS_DIR
 
 PROMPT_FILE = PROMPTS_DIR / "reply_v1.md"
@@ -56,7 +57,7 @@ def openai_chat(arm, msgs, rec, timeout=60):
         json=body,
         timeout=timeout,
     )
-    r.raise_for_status()
+    errors.check(r, arm, rec)
     payload = r.json()
     choice = payload["choices"][0]
     text = (choice["message"].get("content") or "").strip()
