@@ -213,35 +213,42 @@ to the right name.
 
 ### What choosing an arm cost, measured
 
-`make arms`, 2026-08-18, one call each on the same 3.30 s segment / same transcript / same sentence.
-`load` is excluded — weights are warmed before the call, as in the loop.
+`make arms`, 2026-08-18, **two runs**, one call per arm per run on the same 3.30 s segment / same
+transcript / same sentence. `load` is excluded — weights are warmed before the call, as in the loop.
+Both runs are shown because one of them alone would misrepresent the hosted arms: the spread below
+is free-tier queueing, not model speed.
 
-| Stage | Arm | Call | Output |
-|---|---|---|---|
-| stt | `openai/whisper-large-v3-turbo` @ groq | 364 ms | `'Hello. So this is testing.'` |
-| stt | `openai/whisper-large-v3` @ groq | 297 ms | `'Hello. So this is testing.'` |
-| stt | `openai/whisper-base` @ local | 4685 ms | `'So this is testing.'` |
-| stt | `Systran/faster-whisper-base` @ local | 827 ms | `'So this is testing.'` |
-| llm | `meta-llama/Llama-3.1-8B-Instruct` @ nvidia-nim | 1503 ms | 17 completion tokens |
-| llm | `openai/gpt-oss-120b` @ groq | 633 ms | 61 completion tokens |
-| llm | `meta-llama/Llama-3.1-70B-Instruct` @ nvidia-nim | 39286 ms | 16 completion tokens |
-| tts | `hexgrad/Kokoro-82M` @ local | 1532 ms | 2.25 s at 24 kHz |
-| tts | `microsoft/speecht5_tts` @ local | 1944 ms | 1.92 s at 16 kHz |
+| Stage | Arm | Call, run 1 | Call, run 2 | Output |
+|---|---|---|---|---|
+| stt | `openai/whisper-large-v3-turbo` @ groq | 364 ms | 397 ms | `'Hello. So this is testing.'` |
+| stt | `openai/whisper-large-v3` @ groq | 297 ms | 280 ms | `'Hello. So this is testing.'` |
+| stt | `openai/whisper-base` @ local | 4685 ms | 2438 ms | `'So this is testing.'` |
+| stt | `Systran/faster-whisper-base` @ local | 827 ms | 1018 ms | `'So this is testing.'` |
+| llm | `meta-llama/Llama-3.1-8B-Instruct` @ nvidia-nim | 1503 ms | 384 ms | 17 completion tokens |
+| llm | `openai/gpt-oss-120b` @ groq | 633 ms | 733 ms | 61-62 completion tokens |
+| llm | `meta-llama/Llama-3.1-70B-Instruct` @ nvidia-nim | 39286 ms | 8139 ms | 16-19 completion tokens |
+| tts | `hexgrad/Kokoro-82M` @ local | 1532 ms | 1839 ms | 2.25 s at 24 kHz |
+| tts | `microsoft/speecht5_tts` @ local | 1944 ms | 2092 ms | 1.92 s at 16 kHz |
 
-Three findings, each n=1 and none of them a distribution:
+Three findings. n=2 per arm, so the transcripts are a result and the timings are a range:
 
-1. **Both `base` arms drop the first word.** Given identical audio the Groq `large-v3` arms return
-   `'Hello. So this is testing.'` and both local `base` arms return `'So this is testing.'`. The
-   local arms are not a cheaper version of the same transcript, they are a worse one, and the word
-   they lose is the one at the start of the turn. WER on `evals/dev` is the measurement that should
-   decide this, not this one clip.
-2. **Same weights, 5.7x apart on runtime.** `openai/whisper-base` through transformers took 4685 ms;
-   the CTranslate2 int8 conversion of the same model took 827 ms for a character-identical
-   transcript. The arm that matters for latency here is the runtime, not the model.
-3. **70B on the NIM free tier is not a real-time arm.** 39 s for 16 tokens, against 1.5 s for the 8B
-   on the same provider. `meta-llama/Llama-3.3-70B-Instruct` — what open question 1 actually asked
-   for — is worse: not on this Groq key's catalogue (404), and no answer from NIM inside 120 s on
-   two attempts, so 3.1-70B stands in for it.
+1. **Both `base` arms drop the first word — the only finding here that is not about latency.**
+   Given identical audio the Groq `large-v3` arms return `'Hello. So this is testing.'` and both
+   local `base` arms return `'So this is testing.'`, identically in both runs. The local arms are
+   not a cheaper version of the same transcript, they are a worse one, and the word they lose is
+   the one that starts the turn. WER on `evals/dev` is the measurement that should decide this, not
+   this one clip.
+2. **Same weights, 2.4-5.7x apart on runtime.** `openai/whisper-base` through transformers took
+   4685 ms then 2438 ms; the CTranslate2 int8 conversion of the same model took 827 ms then
+   1018 ms, for a character-identical transcript both times. The direction is consistent across
+   runs even though the ratio is not; for latency the arm that matters here is the runtime, not the
+   model.
+3. **70B on the NIM free tier is the slowest arm by an order of magnitude, and the least
+   predictable.** 39.3 s then 8.1 s for ~17 tokens, against the 8B's 1.5 s then 0.4 s on the same
+   provider. `meta-llama/Llama-3.3-70B-Instruct` — what open question 1 actually asked for — is
+   worse still: not on this Groq key's catalogue (404), and no answer from NIM inside 120 s on two
+   attempts, so 3.1-70B stands in for it. Nothing here says 70B is slow *as a model*; it says this
+   free tier does not serve it at conversational latency.
 
 Also worth recording, because it constrains arm choice rather than tuning: **every chat model Groq's
 free tier now serves is a reasoning model.** At default effort `openai/gpt-oss-120b` spent the whole
@@ -256,10 +263,10 @@ silence to TTS.
 
 1. ~~Which NLU model on NVIDIA NIM free tier?~~ **Settled by the VOX-002 ticket:**
    `meta-llama/Llama-3.1-8B-Instruct`. ~~Revisit against 3.3-70B under VOX-013 with measurements.~~
-   **The 70B revisit is now an arm, and the first measurement is in:** 3.3-70B is unreachable
+   **The 70B revisit is now an arm, and the first measurements are in:** 3.3-70B is unreachable
    (404 on Groq's catalogue; no answer from NIM inside 120 s, twice), and 3.1-70B on NIM answered in
-   39 s against the 8B's 1.5 s. It stays registered as `llama-70b` so VOX-013 can measure quality
-   against that cost, but it is not a candidate default. See the measured table above.
+   39.3 s and 8.1 s against the 8B's 1.5 s and 0.4 s. It stays registered as `llama-70b` so VOX-013
+   can measure quality against that cost, but it is not a candidate default. See the table above.
 2. ~~TTS: local `espnet` or NIM?~~ **Settled by the VOX-002 ticket:** `hexgrad/Kokoro-82M`,
    local. (This doc originally proposed `espnet/kan-bayashi_ljspeech_vits`; the ticket names
    Kokoro, so the ticket wins.)
