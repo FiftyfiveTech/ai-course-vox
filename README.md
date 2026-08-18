@@ -40,6 +40,12 @@ two logs joined by `turn_id` — `runs/calls.jsonl` (one line per model call, co
 latency) and `runs/turns.jsonl` (one line per turn, the five-field latency split). See the
 telemetry section of `ARCHITECTURE.md`.
 
+## Held-out seal
+
+`evals/heldout/labels.json` — 30 gold labels, sealed as tag `heldout-v1`.
+
+SHA-256: `030ca138283223f8d004071c7c92ed4343ff66b0ddffb0497c2eb59faa9438f9`
+
 ## Swapping models (VOX-006)
 
 Each stage is an arm chosen at run time. `src/arms.py` is the only interface —
