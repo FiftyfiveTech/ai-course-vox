@@ -46,6 +46,26 @@ telemetry section of `ARCHITECTURE.md`.
 
 SHA-256: `030ca138283223f8d004071c7c92ed4343ff66b0ddffb0497c2eb59faa9438f9`
 
+## Swapping models (VOX-006)
+
+Each stage is an arm chosen at run time. `src/arms.py` is the only interface —
+`stt(audio, model_id)`, `llm(msgs, model_id)`, `tts(text, model_id)` — and `src/config.py` is the
+only table. Arms are named by **HF repo id**, with a short alias for typing and
+`repo/id@provider` when two providers serve the same weights.
+
+```bash
+make arms                                    # call all 9 arms once, print the calls.jsonl lines
+uv run python scripts/check_arms.py --list   # just the table
+uv run python -m src.loop --stt openai/whisper-base --tts microsoft/speecht5_tts
+uv run python scripts/turn_from_fixture.py --llm gpt-oss
+VOX_STT_MODEL=faster-base make turn          # env sets the default; an explicit flag wins
+```
+
+Currently 4 STT / 3 LLM / 2 TTS arms, hosted (Groq, NVIDIA NIM free tiers) and local. Defaults are
+unchanged from VOX-002, so `make demo` and `make turn` still reproduce those numbers and a clean
+clone downloads no extra weights — only `make arms` does (~1.1 GB). The measured cost of each arm,
+and what the local ones get wrong, is in the models section of `ARCHITECTURE.md`.
+
 ## Rules that live in this repo
 
 `CLAUDE.md` carries the full contract. The short version:

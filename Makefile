@@ -1,4 +1,4 @@
-.PHONY: setup test gate demo turn board clean
+.PHONY: setup test gate demo turn arms board clean
 .DEFAULT_GOAL := help
 
 help:
@@ -7,6 +7,7 @@ help:
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    run the thing end to end (needs a mic)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
+	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 
 setup:
@@ -33,6 +34,12 @@ demo:
 # t_vad is not the live number.
 turn:
 	uv run python scripts/turn_from_fixture.py tests/fixtures/hello_testing_voice.mp3
+
+# Every arm in the registry, one real call each, then the runs/calls.jsonl lines those calls wrote.
+# `--list` alone prints the table without calling anything. First run downloads the local weights
+# (~1.1 GB); `make demo` does not, because the defaults are unchanged.
+arms:
+	uv run python scripts/check_arms.py
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.

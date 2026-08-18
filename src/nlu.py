@@ -1,4 +1,10 @@
-"""Transcript to spoken reply: meta-llama/Llama-3.1-8B-Instruct on the NVIDIA NIM free tier.
+"""Transcript to spoken reply.
+
+Two things live here: the one LLM backend (an OpenAI-compatible /chat/completions call, which is
+what both the NIM arm and the Groq arm speak), and the message assembly that turns a transcript
+into the `msgs` list that `arms.llm()` takes. Keeping those apart is what makes the arm swappable —
+the prompt is a property of the task, the arm is a property of the run, and VOX-018 will version
+the first without touching the second.
 
 Phase 0 asks only for a reply. Structured intent extraction is VOX-019, so nothing here parses
 entities — keeping the two apart means the Evaluator can tell which commit satisfied which gate.
@@ -7,10 +13,14 @@ import re
 
 import httpx
 
-from src.config import LLM, PROMPTS_DIR
-from src.telemetry import log_call
+from src.config import PROMPTS_DIR
 
 PROMPT_FILE = PROMPTS_DIR / "reply_v1.md"
+
+# A spoken turn is short; this is a guardrail, not a target. Held equal across arms so a latency
+# comparison is not really a comparison of how much each arm was allowed to say.
+MAX_TOKENS = 120
+TEMPERATURE = 0.3
 
 
 def system_prompt():
@@ -19,31 +29,61 @@ def system_prompt():
     return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
 
 
-def reply(transcript, turn_id, timeout=30):
-    """-> one short reply suitable for reading aloud."""
-    with log_call("llm", LLM, turn_id, prompt_file=PROMPT_FILE.name,
-                  transcript_chars=len(transcript)) as rec:
-        r = httpx.post(
-            f"{LLM.api_base}/chat/completions",
-            headers={"Authorization": f"Bearer {LLM.key()}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": LLM.provider_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt()},
-                    {"role": "user", "content": transcript},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 120,   # a spoken turn is short; this is a guardrail, not a target
-            },
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        body = r.json()
-        text = body["choices"][0]["message"]["content"].strip()
-        usage = body.get("usage") or {}
-        rec["prompt_tokens"] = usage.get("prompt_tokens")
-        rec["completion_tokens"] = usage.get("completion_tokens")
-        rec["reply_chars"] = len(text)
+def messages(transcript):
+    """-> the `msgs` list for arms.llm(). The only place a turn's prompt shape is decided."""
+    return [
+        {"role": "system", "content": system_prompt()},
+        {"role": "user", "content": transcript},
+    ]
 
+
+def openai_chat(arm, msgs, rec, timeout=60):
+    """OpenAI-compatible /chat/completions. Serves every LLM arm; NIM and Groq both speak it.
+
+    `arm.extra["request"]` adds the fields an arm cannot be called without — `reasoning_effort` for
+    gpt-oss. It is merged after the shared parameters and deliberately cannot override them, so no
+    arm can quietly give itself a bigger budget than the ones it is being compared against.
+    """
+    body = {"model": arm.provider_model, "messages": msgs,
+            "temperature": TEMPERATURE, "max_tokens": MAX_TOKENS}
+    for k, v in (arm.extra.get("request") or {}).items():
+        body.setdefault(k, v)
+
+    r = httpx.post(
+        f"{arm.api_base}/chat/completions",
+        headers={"Authorization": f"Bearer {arm.key()}",
+                 "Content-Type": "application/json"},
+        json=body,
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    choice = payload["choices"][0]
+    text = (choice["message"].get("content") or "").strip()
+    usage = payload.get("usage") or {}
+    rec["prompt_tokens"] = usage.get("prompt_tokens")
+    rec["completion_tokens"] = usage.get("completion_tokens")
+    rec["reply_chars"] = len(text)
+    rec["finish_reason"] = choice.get("finish_reason")
+
+    if not text:
+        # A reasoning arm can spend the whole budget thinking and return an empty reply, which
+        # would reach TTS as "synthesise nothing" and fail somewhere far less informative.
+        raise RuntimeError(
+            f"{arm.id} returned an empty reply "
+            f"(finish_reason={choice.get('finish_reason')!r}, "
+            f"{usage.get('completion_tokens')} completion tokens of {MAX_TOKENS}). A reasoning arm "
+            f"needs a reasoning_effort in its config.py request options."
+        )
     return text
+
+
+BACKENDS = {"openai-chat": openai_chat}
+LOADERS = {}          # both arms are hosted; there is nothing to warm
+
+
+def reply(transcript, turn_id, model_id=None):
+    """-> one short reply suitable for reading aloud, from the named arm or the default."""
+    from src import arms                      # imported here: arms imports this module for BACKENDS
+    return arms.llm(messages(transcript), model_id, turn_id=turn_id,
+                    prompt_file=PROMPT_FILE.name, transcript_chars=len(transcript))
