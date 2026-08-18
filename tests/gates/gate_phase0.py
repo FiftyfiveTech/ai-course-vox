@@ -25,7 +25,7 @@ import torchaudio
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src import nlu, stt, tts, vad                                     # noqa: E402
+from src import arms, nlu, vad                                         # noqa: E402
 from src.config import SAMPLE_RATE                                     # noqa: E402
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer  # noqa: E402
 
@@ -44,14 +44,20 @@ def main():
     ap = argparse.ArgumentParser(description="Phase 0 gate — 5-way latency split")
     ap.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE,
                     help="wav file from evals/dev/ to drive the turn (default: utt_001_greet.wav)")
+    # VOX-006 made every stage an arm. The gate certifies the defaults unless told otherwise, so
+    # an unflagged run still measures what Phase 0 ships; the flags let the same gate be re-run
+    # per arm without a second script.
+    arms.add_flags(ap)
     args = ap.parse_args()
 
     if not args.fixture.is_file():
         sys.exit(f"fixture not found: {args.fixture}")
 
-    print("loading local models…", flush=True)
+    print("resolving arms and loading local models…", flush=True)
     vad._vad_model()
-    tts._kokoro()
+    chosen = arms.select(args)
+    for stage, arm in chosen.items():
+        print(f"  {stage:<4} {arm.repo_id}  ({arm.provider}, {arm.backend})")
 
     clip = load_16k_mono(args.fixture)
     turn_id = new_turn_id()
@@ -65,19 +71,20 @@ def main():
         if cap is None:
             sys.exit(f"endpointer found no speech in {args.fixture} (state={state})")
         turn.vad(cap)
+        turn.arms(**chosen)
 
         with turn.stage("stt"):
-            transcript = stt.transcribe(cap.segment, turn_id)
+            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id)
         print(f"you said : {transcript!r}")
         if not transcript:
             sys.exit("empty transcript from STT — cannot continue")
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id)
+            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id)
         print(f"vox says : {answer!r}")
 
         with turn.stage("tts"):
-            _speech = tts.synthesize(answer, turn_id)
+            _speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id)
 
         print("(gate: speaker skipped, time_to_first_audio not measured)")
 
