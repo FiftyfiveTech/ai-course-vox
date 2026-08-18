@@ -141,16 +141,19 @@ Maximum 2 re-asks before the action is aborted and logged.
 
 ```
 src/
-  config.py        — model registry (HF repo id -> provider) + endpointing constants
-  telemetry.py     — shared cost/latency logger; every model call goes through this
+  config.py        — the arm table (HF repo id -> provider) + resolve() + endpointing constants
+  arms.py          — the one interface: stt(audio, id) / llm(msgs, id) / tts(text, id); resolves,
+                     logs and dispatches. Every model call goes through here.
+  telemetry.py     — shared cost/latency logger; arms.py is its only caller for model calls
   vad.py           — endpointing via snakers4/silero-vad (local)
-  stt.py           — speech-to-text via openai/whisper-large-v3-turbo (Groq)
-  nlu.py           — transcript -> spoken reply; structured extraction lands in VOX-019
+  stt.py           — STT backends: openai-audio (Groq), transformers-whisper, faster-whisper
+  nlu.py           — the openai-chat backend + the message assembly arms.llm() takes;
+                     structured extraction lands in VOX-019
   audio.py         — speaker playback, kept apart from synthesis so VOX-011 can interrupt it
   loop.py          — one chained turn; `make demo`
   confirm.py       — confirmation flow logic (VOX-020, not yet written)
   actions.py       — tool/API calls (read and write) (not yet written)
-  tts.py           — text-to-speech via hexgrad/Kokoro-82M (local)
+  tts.py           — TTS backends: kokoro, speecht5
 
 prompts/
   reply_v1.md      — spoken-reply prompt (versioned; never inline)
@@ -172,25 +175,91 @@ tests/
 
 ## Models (HF repo ids)
 
-| Role | HF repo id | Runs on |
-|---|---|---|
-| VAD / endpointing | `snakers4/silero-vad` | local |
-| STT | `openai/whisper-large-v3-turbo` | Groq free tier |
-| NLU / reply | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier |
-| TTS | `hexgrad/Kokoro-82M` | local |
+Every stage is an **arm** chosen at run time (VOX-006). Provider = where it runs. The model id is
+the HF repo id, not the provider name; the mapping from repo id to each provider's own model string
+lives only in `src/config.py`.
 
-Provider = where it runs. The model id is the HF repo id, not the provider name. The mapping from
-repo id to each provider's own model string lives only in `src/config.py`.
+| Stage | HF repo id | Runs on | Backend | Alias |
+|---|---|---|---|---|
+| VAD | `snakers4/silero-vad` | local | — | not yet an arm |
+| STT | `openai/whisper-large-v3-turbo` | Groq free tier | `openai-audio` | `turbo` **(default)** |
+| STT | `openai/whisper-large-v3` | Groq free tier | `openai-audio` | `large-v3` |
+| STT | `openai/whisper-base` | local | `transformers-whisper` | `whisper-base` |
+| STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` |
+| LLM | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-8b` **(default)** |
+| LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` |
+| LLM | `meta-llama/Llama-3.1-70B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-70b` |
+| TTS | `hexgrad/Kokoro-82M` | local | `kokoro` | `kokoro` **(default)** |
+| TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` |
 
-VOX-006 replaces this fixed table with arms selectable by flag; until then Phase 0 pins one arm
-per stage so a measured number always has an unambiguous model behind it.
+The defaults are the arms VOX-002 and VOX-003 measured, so an unflagged run still reproduces those
+numbers. Selection:
+
+```bash
+make arms                                    # call every arm once, print the calls.jsonl lines
+uv run python scripts/check_arms.py --list   # the table, no calls
+uv run python -m src.loop --stt openai/whisper-base --tts microsoft/speecht5_tts
+uv run python scripts/turn_from_fixture.py --llm gpt-oss     # alias, repo id, or repo/id@provider
+VOX_STT_MODEL=faster-base make turn                          # env sets the default; the flag wins
+```
+
+`stt_model` / `llm_model` / `tts_model` on every `runs/turns.jsonl` line name the arms that produced
+that latency split, so two runs with different arms cannot be quietly averaged.
+
+Two arms sharing a `backend` share an adapter, so a new arm on an existing runtime is a table row in
+`src/config.py` and no new code. `resolve()` refuses a bare repo id that two providers serve — the
+same Llama can be a NIM arm or a Groq arm, and a silently chosen provider attaches the wrong latency
+to the right name.
+
+### What choosing an arm cost, measured
+
+`make arms`, 2026-08-18, one call each on the same 3.30 s segment / same transcript / same sentence.
+`load` is excluded — weights are warmed before the call, as in the loop.
+
+| Stage | Arm | Call | Output |
+|---|---|---|---|
+| stt | `openai/whisper-large-v3-turbo` @ groq | 364 ms | `'Hello. So this is testing.'` |
+| stt | `openai/whisper-large-v3` @ groq | 297 ms | `'Hello. So this is testing.'` |
+| stt | `openai/whisper-base` @ local | 4685 ms | `'So this is testing.'` |
+| stt | `Systran/faster-whisper-base` @ local | 827 ms | `'So this is testing.'` |
+| llm | `meta-llama/Llama-3.1-8B-Instruct` @ nvidia-nim | 1503 ms | 17 completion tokens |
+| llm | `openai/gpt-oss-120b` @ groq | 633 ms | 61 completion tokens |
+| llm | `meta-llama/Llama-3.1-70B-Instruct` @ nvidia-nim | 39286 ms | 16 completion tokens |
+| tts | `hexgrad/Kokoro-82M` @ local | 1532 ms | 2.25 s at 24 kHz |
+| tts | `microsoft/speecht5_tts` @ local | 1944 ms | 1.92 s at 16 kHz |
+
+Three findings, each n=1 and none of them a distribution:
+
+1. **Both `base` arms drop the first word.** Given identical audio the Groq `large-v3` arms return
+   `'Hello. So this is testing.'` and both local `base` arms return `'So this is testing.'`. The
+   local arms are not a cheaper version of the same transcript, they are a worse one, and the word
+   they lose is the one at the start of the turn. WER on `evals/dev` is the measurement that should
+   decide this, not this one clip.
+2. **Same weights, 5.7x apart on runtime.** `openai/whisper-base` through transformers took 4685 ms;
+   the CTranslate2 int8 conversion of the same model took 827 ms for a character-identical
+   transcript. The arm that matters for latency here is the runtime, not the model.
+3. **70B on the NIM free tier is not a real-time arm.** 39 s for 16 tokens, against 1.5 s for the 8B
+   on the same provider. `meta-llama/Llama-3.3-70B-Instruct` — what open question 1 actually asked
+   for — is worse: not on this Groq key's catalogue (404), and no answer from NIM inside 120 s on
+   two attempts, so 3.1-70B stands in for it.
+
+Also worth recording, because it constrains arm choice rather than tuning: **every chat model Groq's
+free tier now serves is a reasoning model.** At default effort `openai/gpt-oss-120b` spent the whole
+120-token budget thinking and returned an empty string, so that arm carries
+`request={"reasoning_effort": "low"}` in `src/config.py` — not a tuning knob, a precondition for the
+arm answering at all. `src/nlu.py` raises a named error on an empty reply rather than handing
+silence to TTS.
 
 ---
 
 ## Open questions (for sign-off session)
 
 1. ~~Which NLU model on NVIDIA NIM free tier?~~ **Settled by the VOX-002 ticket:**
-   `meta-llama/Llama-3.1-8B-Instruct`. Revisit against 3.3-70B under VOX-013 with measurements.
+   `meta-llama/Llama-3.1-8B-Instruct`. ~~Revisit against 3.3-70B under VOX-013 with measurements.~~
+   **The 70B revisit is now an arm, and the first measurement is in:** 3.3-70B is unreachable
+   (404 on Groq's catalogue; no answer from NIM inside 120 s, twice), and 3.1-70B on NIM answered in
+   39 s against the 8B's 1.5 s. It stays registered as `llama-70b` so VOX-013 can measure quality
+   against that cost, but it is not a candidate default. See the measured table above.
 2. ~~TTS: local `espnet` or NIM?~~ **Settled by the VOX-002 ticket:** `hexgrad/Kokoro-82M`,
    local. (This doc originally proposed `espnet/kan-bayashi_ljspeech_vits`; the ticket names
    Kokoro, so the ticket wins.)
