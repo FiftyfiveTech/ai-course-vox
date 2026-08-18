@@ -3,25 +3,31 @@
     uv run python -m src.loop          one turn, then exit
     uv run python -m src.loop --turns 3
 
+    uv run python -m src.loop --stt openai/whisper-base --tts microsoft/speecht5_tts
+
 Deliberately one turn by default: VOX-002 is "you speak, you hear a reply". Barge-in is VOX-011,
 so that is not here. The five-field latency split is VOX-003 and it is here from the first
 commit that has a turn to measure — retrofitting timings onto a loop that already runs means
 tuning against numbers nobody watched being taken.
+
+Which model runs each stage is a flag (VOX-006), and the arms are named on the turn record, so two
+runs with different arms cannot be quietly averaged together.
 """
 import argparse
 import sys
 
-from src import audio, nlu, stt, tts, vad
-from src.config import CONSENT_NOTICE, LLM, STT, TTS
+from src import arms, audio, nlu, vad
+from src.config import CONSENT_NOTICE
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
 
 
-def one_turn():
-    """-> True if a reply was spoken, False if the mic stayed quiet."""
+def one_turn(chosen):
+    """-> True if a reply was spoken, False if the mic stayed quiet. `chosen` maps stage -> Arm."""
     turn_id = new_turn_id()
     print(f"\n--- turn {turn_id} ---")
 
     with turn_timer(turn_id, source="mic") as turn:
+        turn.arms(**chosen)
         cap = vad.listen()
         if cap is None:
             print("nothing heard — stopping.")
@@ -29,7 +35,7 @@ def one_turn():
         turn.vad(cap)
 
         with turn.stage("stt"):
-            transcript = stt.transcribe(cap.segment, turn_id)
+            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id)
         print(f"you said : {transcript!r}")
         if not transcript:
             # Whisper returning empty on real audio is a provider problem, not a quiet user.
@@ -37,14 +43,14 @@ def one_turn():
             return False
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id)
+            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id)
         print(f"vox says : {answer!r}")
 
         with turn.stage("tts"):
-            speech = tts.synthesize(answer, turn_id)
+            speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id)
 
         print("speaking…", flush=True)
-        audio.play(speech, on_first_audio=turn.first_audio)
+        audio.play(speech.audio, sample_rate=speech.sample_rate, on_first_audio=turn.first_audio)
 
     print("  " + report(turn.written))
     return True
@@ -63,25 +69,25 @@ def report(rec):
 def main():
     ap = argparse.ArgumentParser(description="VOX — one chained turn (VOX-002)")
     ap.add_argument("--turns", type=int, default=1, help="how many turns before exiting")
+    arms.add_flags(ap)
     args = ap.parse_args()
 
     print("VOX — chained turn loop")
-    print(f"  stt  {STT.repo_id}  ({STT.provider})")
-    print(f"  llm  {LLM.repo_id}  ({LLM.provider})")
-    print(f"  tts  {TTS.repo_id}  ({TTS.provider})")
 
-    # Load the local weights before the turn starts. Kokoro takes ~10 s to load and silero a
+    # Resolving and loading happen before the turn starts. Kokoro takes ~10 s to load and silero a
     # moment; leaving that inside the turn would bury it in t_tts and t_vad and make the
     # latency split a lie. VOX-003 measures the warm path, which is the one users feel.
-    print("\nloading local models…", flush=True)
+    print("resolving arms and loading local models…", flush=True)
     vad._vad_model()
-    tts._kokoro()
+    chosen = arms.select(args)
+    for stage, arm in chosen.items():
+        print(f"  {stage:<4} {arm.repo_id}  ({arm.provider}, {arm.backend})")
 
     print(f"\n{CONSENT_NOTICE}\n")
 
     spoken = 0
     for _ in range(args.turns):
-        if not one_turn():
+        if not one_turn(chosen):
             break
         spoken += 1
 

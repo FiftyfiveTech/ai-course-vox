@@ -66,7 +66,10 @@ def log_call(stage, arm, turn_id, **extra):
         _append(record)
 
 
-def _append(record, path=CALLS_LOG):
+def _append(record, path=None):
+    # Looked up at call time, not bound as a default: a default argument would capture CALLS_LOG at
+    # import and quietly ignore a test that redirects it, so an arm test would append to the real log.
+    path = path or CALLS_LOG
     RUNS_DIR.mkdir(exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
@@ -101,6 +104,18 @@ class TurnTimer:
         self.extra = {}
         self.error = None
         self.written = None               # the record that reached disk, so prints cannot drift
+
+    def arms(self, **by_stage):
+        """Record which arm ran each stage, as `<repo id>@<provider>` (VOX-006).
+
+        Without this a turn line is a latency split with no model behind it, and once arms are
+        selectable by flag two lines that look comparable may not be. Joining to calls.jsonl on
+        turn_id would also answer it, but the comparison VOX-013 has to make is per turn.
+        """
+        for stage, arm in by_stage.items():
+            if stage not in self.ms:
+                raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
+            self.extra[f"{stage}_model"] = arm.id if hasattr(arm, "id") else arm
 
     def vad(self, capture):
         """Adopt the endpointer's marks: t_vad, and the origin the whole turn is measured from."""

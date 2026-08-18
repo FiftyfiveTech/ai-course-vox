@@ -25,7 +25,7 @@ import torchaudio
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import audio as audio_out                                          # noqa: E402
-from src import nlu, stt, tts, vad                                          # noqa: E402
+from src import arms, nlu, vad                                              # noqa: E402
 from src.config import SAMPLE_RATE                                          # noqa: E402
 from src.loop import report                                                 # noqa: E402
 from src.telemetry import TURNS_LOG, new_turn_id, turn_timer                # noqa: E402
@@ -47,6 +47,7 @@ def main():
     ap.add_argument("--silent", action="store_true",
                     help="skip playback — leaves time_to_first_audio unmeasured, so the turn "
                          "line is written with ok=false")
+    arms.add_flags(ap)
     args = ap.parse_args()
 
     if not args.recording.is_file():
@@ -54,15 +55,18 @@ def main():
 
     # Same as the live loop: local weights load before the turn, so a ~10 s Kokoro import does
     # not land inside t_tts and make the split a lie.
-    print("loading local models…", flush=True)
+    print("resolving arms and loading local models…", flush=True)
     vad._vad_model()
-    tts._kokoro()
+    chosen = arms.select(args)
+    for stage, arm in chosen.items():
+        print(f"  {stage:<4} {arm.repo_id}  ({arm.provider}, {arm.backend})")
 
     clip = load_16k_mono(args.recording)
     turn_id = new_turn_id()
     print(f"\n--- turn {turn_id} · {args.recording} ({len(clip) / SAMPLE_RATE:.2f}s) ---")
 
     with turn_timer(turn_id, source=str(args.recording)) as turn:
+        turn.arms(**chosen)
         cap, state = vad.endpoint_frames(vad.frames_from(clip))
         if cap is None:
             sys.exit(f"endpointer found no turn in {args.recording} (state={state})")
@@ -71,23 +75,24 @@ def main():
               f"state={state}")
 
         with turn.stage("stt"):
-            transcript = stt.transcribe(cap.segment, turn_id)
+            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id)
         print(f"you said : {transcript!r}")
         if not transcript:
             sys.exit("empty transcript from STT — not calling the LLM.")
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id)
+            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id)
         print(f"vox says : {answer!r}")
 
         with turn.stage("tts"):
-            speech = tts.synthesize(answer, turn_id)
+            speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id)
 
         if args.silent:
             print("(--silent: not playing, time_to_first_audio will be null)")
         else:
             print("speaking…", flush=True)
-            audio_out.play(speech, on_first_audio=turn.first_audio)
+            audio_out.play(speech.audio, sample_rate=speech.sample_rate,
+                           on_first_audio=turn.first_audio)
 
     print("\n" + report(turn.written))
     print(f"turn line appended to {TURNS_LOG}")
