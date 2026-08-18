@@ -16,8 +16,10 @@ setup:
 	@test -f .env || { cp .env.example .env; echo "wrote .env from .env.example — fill it in"; }
 	@echo "ok. next: make test"
 
+# The whole unit suite lives under tests/unit/, which is what VOX-007's gate command names. Gates
+# are a separate target because they make real calls and need the dev set on disk.
 test:
-	uv run pytest tests -q --ignore=tests/gates
+	uv run pytest tests/unit -q
 
 gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
