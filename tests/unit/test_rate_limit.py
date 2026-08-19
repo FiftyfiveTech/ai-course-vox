@@ -24,6 +24,10 @@ from src import arms, errors, loop, nlu, stt
 from src.config import LLM_ARMS, STT_ARMS, TTS_ARMS
 from src.errors import RateLimited
 
+# `serve` patches httpx per module, so the local fallback arms below are patched at the BACKENDS
+# seam instead — they never speak HTTP, and loading real whisper weights in a unit test would make
+# this suite need a network and a gigabyte of disk.
+
 RETRY_AFTER = 12.5
 
 
@@ -119,22 +123,48 @@ def test_the_message_names_the_arm_and_the_wait(module, backend, stage, payload,
     assert "12.5s" in str(e.value)
 
 
-def test_a_429_is_logged_before_it_propagates(monkeypatch, calls_log):
-    """The "not swallowed" assertion. Fails the day anyone wraps a call in a bare except."""
+def test_a_429_is_logged_before_the_fallback_runs(monkeypatch, calls_log):
+    """The "not swallowed" assertion, now that the 429 is survivable.
+
+    A stage that falls back returns a transcript, so the 429 no longer reaches the caller — which is
+    exactly the shape of change that quietly loses a failure. It must therefore be *more* visible in
+    the log, not less: the refusal is line one with ok:false, and the arm that covered for it is
+    line two, naming what it stood in for. Fails the day anyone wraps a call in a bare except.
+    """
     arm = hosted_arm("stt")
     serve(monkeypatch, stt, rate_limited())
 
+    arms.stt([0.0] * 16, arm.id, turn_id="t429")
+
+    refused, covered = [json.loads(x) for x in calls_log.read_text(encoding="utf-8").splitlines()]
+
+    assert refused["ok"] is False
+    assert "RateLimited" in refused["error"]
+    assert refused["status_code"] == 429
+    assert refused["retry_after_s"] == RETRY_AFTER
+    assert refused["model_id"] == arm.repo_id        # the HF repo id, not the provider's string
+    assert refused["cost_usd"] == 0.0                # a refused call still cost nothing
+    assert refused["turn_id"] == "t429"
+
+    assert covered["ok"] is True
+    assert covered["fallback_for"] == arm.id, "the local line must say whose work it took over"
+    assert covered["turn_id"] == "t429"              # both attempts belong to the same turn
+
+
+def test_a_429_still_propagates_when_there_is_nowhere_to_fall_back(monkeypatch, calls_log):
+    """The control for the test above: covering a 429 is the fallback's doing, not the 429's.
+
+    Without this, the change from `pytest.raises` to a plain call reads as "a 429 is fine now".
+    Remove the stage's fallback and the original contract is exactly as it was.
+    """
+    monkeypatch.delitem(arms.FALLBACKS, "stt")
+    serve(monkeypatch, stt, rate_limited())
+
     with pytest.raises(RateLimited):
-        arms.stt([0.0] * 16, arm.id, turn_id="t429")
+        arms.stt([0.0] * 16, hosted_arm("stt").id, turn_id="t429")
 
     rec = json.loads(calls_log.read_text(encoding="utf-8").strip())
-    assert rec["ok"] is False
-    assert "RateLimited" in rec["error"]
-    assert rec["status_code"] == 429
-    assert rec["retry_after_s"] == RETRY_AFTER
-    assert rec["model_id"] == arm.repo_id            # the HF repo id, not the provider's string
-    assert rec["cost_usd"] == 0.0                    # a refused call still cost nothing
-    assert rec["turn_id"] == "t429"
+    assert rec["ok"] is False and rec["status_code"] == 429
 
 
 def test_a_429_is_distinguishable_from_a_bad_key(monkeypatch, calls_log):
@@ -194,40 +224,79 @@ def test_a_success_records_its_status_code(module, backend, stage, payload, ok_r
 
 # --- the turn ------------------------------------------------------------------------------
 
-def test_a_rate_limited_turn_records_the_error_and_reports_it(monkeypatch, turns_log, capsys):
-    """Through main(), because deciding the session is over is main's call, not a turn's.
+def test_a_rate_limited_turn_falls_back_and_still_records_the_refusal(monkeypatch, turns_log,
+                                                                      capsys):
+    """The 429 no longer ends the turn — but it must not become invisible either.
 
-    A traceback is technically "surfaced" but it is not readable, and it skips the summary that
-    tells you where the logs are. This asserts a sentence on stderr and a turn line on disk.
+    Three things have to be true at once, and it is the third that stops this being a way to hide a
+    rate limit: stderr says it happened, the turn record names the arm that *actually* ran rather
+    than the one that was selected, and the failed attempt's own latency is broken out so the local
+    arm is not credited with a dead round-trip.
     """
-    monkeypatch.setattr("sys.argv", ["vox", "--turns", "3"])
+    remote = hosted_arm("stt")
+    monkeypatch.setattr("sys.argv", ["vox", "--turns", "1"])
     monkeypatch.setattr(loop.vad, "_vad_model", lambda: None)
     monkeypatch.setattr(loop.arms, "select", lambda args: {
-        "stt": hosted_arm("stt"), "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
+        "stt": remote, "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
+    monkeypatch.setattr(loop.nlu, "reply", lambda *a, **kw: "On the fourth.")
+    monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: None)
     serve(monkeypatch, stt, rate_limited())
+    local_stt(monkeypatch, "when was I paid")
+    working_tts(monkeypatch)
 
-    assert loop.main() == 1                              # nothing was spoken
+    assert loop.main() == 0, "the fallback answered, so the turn was spoken"
 
     err = capsys.readouterr().err
-    assert "RATE LIMITED" in err
-    assert "12.5s" in err
+    assert "STT FALLBACK" in err
+    assert "12.5s" in err                                # which refusal, and for how long
     assert "Traceback" not in err
 
     rec = json.loads(turns_log.read_text(encoding="utf-8").strip())
-    assert rec["ok"] is False
-    assert "RateLimited" in rec["error"]
-    assert rec["t_stt_ms"] is not None                   # the refusal took time; it is logged
+    assert rec["fell_back"] == ["stt"]
+    assert rec["stt_model"] == arms.resolve("stt", arms.FALLBACKS["stt"]).id
+    assert rec["stt_fallback_from"] == remote.id
+    assert "RateLimited" in rec["stt_fallback_reason"]
+    assert rec["stt_failed_ms"] is not None, "the refusal took time and must not vanish into t_stt"
 
 
-def test_a_rate_limit_stops_the_run_rather_than_hammering_the_provider(monkeypatch, capsys):
-    """Retrying a pace limit two more times in the same second is how a free tier gets shut off."""
-    attempts = []
+def test_a_rate_limit_never_retries_the_same_arm(monkeypatch, capsys):
+    """Retrying a pace limit twice in the same second is how a free tier gets shut off.
+
+    This used to be spelled "the run stops on the first 429". Falling back changed the remedy but
+    not the rule, and made it stricter: the arm goes on cooldown for the window the provider asked
+    for, so turn two does not even attempt it. Five turns, one request.
+    """
+    remote = hosted_arm("stt")
+    monkeypatch.setattr("sys.argv", ["vox", "--turns", "5"])
+    monkeypatch.setattr(loop.vad, "_vad_model", lambda: None)
+    monkeypatch.setattr(loop.arms, "select", lambda args: {
+        "stt": remote, "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
+    monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
+    monkeypatch.setattr(loop.nlu, "reply", lambda *a, **kw: "On the fourth.")
+    monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: None)
+    posts = serve(monkeypatch, stt, rate_limited())
+    local_stt(monkeypatch, "when was I paid")
+    working_tts(monkeypatch)
+
+    assert loop.main() == 0
+    assert len(posts) == 1, "the rate-limited arm must be asked once, not once per turn"
+
+
+def test_a_rate_limit_that_the_fallback_cannot_cover_still_stops_the_run(monkeypatch, turns_log,
+                                                                        capsys):
+    """The last resort, unchanged. When there is nowhere to go, main() still ends the session.
+
+    Without this the two tests above would pass against a loop that had simply stopped handling
+    RateLimited at all.
+    """
     monkeypatch.setattr("sys.argv", ["vox", "--turns", "5"])
     monkeypatch.setattr(loop.vad, "_vad_model", lambda: None)
     monkeypatch.setattr(loop.arms, "select", lambda args: {
         "stt": STT_ARMS[0], "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
+
+    attempts = []
 
     def limited(*a, **kw):
         attempts.append(1)
@@ -238,6 +307,27 @@ def test_a_rate_limit_stops_the_run_rather_than_hammering_the_provider(monkeypat
 
     assert loop.main() == 1
     assert len(attempts) == 1, "the run must stop on the first 429, not retry inside the loop"
+
+    err = capsys.readouterr().err
+    assert "RATE LIMITED" in err
+    assert "Traceback" not in err
+
+    rec = json.loads(turns_log.read_text(encoding="utf-8").strip())
+    assert rec["ok"] is False
+    assert "RateLimited" in rec["error"]
+    assert rec["t_stt_ms"] is not None                   # the refusal took time; it is logged
+
+
+def local_stt(monkeypatch, text):
+    """Make the STT stage's local fallback arm answer, without weights on disk."""
+    fb = arms.resolve("stt", arms.FALLBACKS["stt"])
+    monkeypatch.setitem(arms._MODULES["stt"].BACKENDS, fb.backend,
+                        lambda arm, payload, rec: text)
+
+
+def working_tts(monkeypatch):
+    monkeypatch.setitem(arms._MODULES["tts"].BACKENDS, TTS_ARMS[0].backend,
+                        lambda arm, text, rec: [0.0] * 240)
 
 
 def _capture():

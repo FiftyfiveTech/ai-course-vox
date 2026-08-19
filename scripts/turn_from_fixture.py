@@ -58,8 +58,7 @@ def main():
     print("resolving arms and loading local models…", flush=True)
     vad._vad_model()
     chosen = arms.select(args)
-    for stage, arm in chosen.items():
-        print(f"  {stage:<4} {arm.repo_id}  ({arm.provider}, {arm.backend})")
+    print(arms.describe(chosen))
 
     clip = load_16k_mono(args.recording)
     turn_id = new_turn_id()
@@ -75,17 +74,20 @@ def main():
               f"state={state}")
 
         with turn.stage("stt"):
-            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id)
+            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id,
+                                  on_fallback=turn.fallback)
         print(f"you said : {transcript!r}")
         if not transcript:
             sys.exit("empty transcript from STT — not calling the LLM.")
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id)
+            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
+                               on_fallback=turn.fallback)
         print(f"vox says : {answer!r}")
 
         with turn.stage("tts"):
-            speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id)
+            speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id,
+                              on_fallback=turn.fallback)
 
         if args.silent:
             print("(--silent: not playing, time_to_first_audio will be null)")

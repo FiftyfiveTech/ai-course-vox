@@ -48,17 +48,40 @@ only table. Arms are named by **HF repo id**, with a short alias for typing and
 `repo/id@provider` when two providers serve the same weights.
 
 ```bash
-make arms                                    # call all 9 arms once, print the calls.jsonl lines
+make arms                                    # call all 10 arms once, print the calls.jsonl lines
 uv run python scripts/check_arms.py --list   # just the table
 uv run python -m src.loop --stt openai/whisper-base --tts microsoft/speecht5_tts
 uv run python scripts/turn_from_fixture.py --llm gpt-oss
 VOX_STT_MODEL=faster-base make turn          # env sets the default; an explicit flag wins
 ```
 
-Currently 4 STT / 3 LLM / 2 TTS arms, hosted (Groq, NVIDIA NIM free tiers) and local. Defaults are
-unchanged from VOX-002, so `make demo` and `make turn` still reproduce those numbers and a clean
-clone downloads no extra weights — only `make arms` does (~1.1 GB). The measured cost of each arm,
-and what the local ones get wrong, is in the models section of `ARCHITECTURE.md`.
+Currently 4 STT / 4 LLM / 2 TTS arms, hosted (Groq, NVIDIA NIM free tiers) and local. Defaults are
+unchanged from VOX-002, so `make demo` and `make turn` still reproduce those numbers. The measured
+cost of each arm, and what the local ones get wrong, is in the models section of `ARCHITECTURE.md`.
+`make arms` calls each arm with fallback disabled — it is measuring the arms, so a refusal has to
+show up on the row it belongs to rather than being quietly covered.
+
+## Where each stage runs
+
+```
+Mic -> [VAD] local -> [STT] remote -> [LLM] remote -> [TTS] local -> Speaker
+                          |                |
+                          +-- on 429, timeout or 5xx --> a local arm
+```
+
+The two expensive stages run on a free tier and the two cheap ones run here. `config.PIPELINE`
+declares that and a test asserts each stage's default arm against it, so reordering the arm tables
+can no longer move a stage across the network boundary by accident.
+
+When a free tier rate-limits, times out or 5xxs, that stage runs its local arm instead of losing
+the turn — loudly, with both attempts in `runs/calls.jsonl` and the arm that actually ran named on
+the turn record. A **bad key or a missing credential deliberately does not fall back**: that is a
+config bug, and hiding it behind a worse transcript is worse than stopping. A 429 also parks the
+arm for its `Retry-After` window so the next turn does not pay another doomed round-trip.
+
+The LLM fallback needs ollama and one ~2 GB pull; `make setup` does it, and warns rather than fails
+if ollama is absent. Full rules, trigger table and measured numbers: the fallback section of
+`ARCHITECTURE.md`.
 
 ## Rules that live in this repo
 

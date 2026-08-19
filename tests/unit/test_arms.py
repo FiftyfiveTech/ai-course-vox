@@ -56,12 +56,22 @@ def test_every_arm_has_an_implemented_backend(stage, arm):
 
 
 @pytest.mark.parametrize("stage,arm", ALL_ARMS, ids=ARM_IDS)
-def test_a_hosted_arm_names_its_credential_and_a_local_one_does_not(stage, arm):
-    if arm.provider == "local":
-        assert arm.api_base is None and arm.key_env is None
+def test_a_remote_arm_names_its_credential_and_a_local_one_needs_none(stage, arm):
+    """The rule is about credentials, not about HTTP.
+
+    This was phrased as `provider == "local"` implies no api_base, which held only while every local
+    arm was loaded in-process. The ollama arm broke that: it runs on this machine and still speaks
+    HTTP, to a daemon on localhost. What has not changed — and is the part worth asserting, because
+    it is the zero-spend constraint in miniature — is that nothing running locally costs a key.
+    """
+    if arm.local:
+        assert arm.key_env is None, f"{arm.id} runs locally and must not need a credential"
         assert arm.key() is None
     else:
         assert arm.api_base and arm.key_env
+
+    if arm.provider == "local":
+        assert arm.api_base is None, "an in-process arm has nothing to connect to"
 
 
 @pytest.mark.parametrize("stage", tuple(ARMS))

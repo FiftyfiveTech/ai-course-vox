@@ -26,7 +26,7 @@ import torchaudio
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import arms, nlu, vad                                              # noqa: E402
-from src.config import ARMS, SAMPLE_RATE                                    # noqa: E402
+from src.config import ARMS, FALLBACKS, PIPELINE, SAMPLE_RATE               # noqa: E402
 from src.telemetry import CALLS_LOG, new_turn_id                            # noqa: E402
 
 FIXTURE = Path("tests/fixtures/hello_testing_voice.mp3")
@@ -46,13 +46,17 @@ def clip_16k(path):
 
 
 def show_table():
-    print(f"{'stage':<6}{'HF repo id':<38}{'provider':<12}{'backend':<22}alias")
+    print(f"{'stage':<6}{'HF repo id':<45}{'provider':<12}{'backend':<22}{'where':<7}alias")
     for stage, stage_arms in ARMS.items():
         for i, a in enumerate(stage_arms):
-            mark = " (default)" if i == 0 else ""
-            print(f"{stage:<6}{a.repo_id:<38}{a.provider:<12}{a.backend:<22}{a.alias}{mark}")
+            marks = " (default)" if i == 0 else ""
+            marks += " (fallback)" if a.alias == FALLBACKS.get(stage) else ""
+            where = "local" if a.local else "remote"
+            print(f"{stage:<6}{a.repo_id:<45}{a.provider:<12}{a.backend:<22}{where:<7}"
+                  f"{a.alias}{marks}")
     counts = ", ".join(f"{len(v)} {k}" for k, v in ARMS.items())
     print(f"\n{counts} — criterion is 3 stt, 2 tts, 2 llm")
+    print("pipeline: " + " -> ".join(f"{s} {p}" for s, p in PIPELINE.items()))
 
 
 def run_one(stage, arm, segment):
@@ -63,13 +67,17 @@ def run_one(stage, arm, segment):
     arms.warm(stage, arm.id)
     load_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+    # fallback=False throughout: this script measures arms against each other, so a rate-limited
+    # Groq arm has to show up as FAILED on its own row. Letting it be rescued would print the local
+    # arm's latency and transcript beside the remote arm's name — the one error this table cannot
+    # afford, because its whole purpose is attributing numbers to models.
     t0 = time.perf_counter()
     if stage == "stt":
-        out = repr(arms.stt(segment, arm.id, turn_id=turn_id))
+        out = repr(arms.stt(segment, arm.id, turn_id=turn_id, fallback=False))
     elif stage == "llm":
-        out = repr(nlu.reply(LLM_TRANSCRIPT, turn_id, model_id=arm.id))
+        out = repr(nlu.reply(LLM_TRANSCRIPT, turn_id, model_id=arm.id, fallback=False))
     else:
-        speech = arms.tts(TTS_TEXT, arm.id, turn_id=turn_id)
+        speech = arms.tts(TTS_TEXT, arm.id, turn_id=turn_id, fallback=False)
         out = f"{len(speech.audio) / speech.sample_rate:.2f}s at {speech.sample_rate} Hz"
     call_ms = round((time.perf_counter() - t0) * 1000, 1)
 

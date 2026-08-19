@@ -1,8 +1,8 @@
-.PHONY: setup test gate demo turn arms board clean
+.PHONY: setup fallback-model test gate demo turn arms board clean
 .DEFAULT_GOAL := help
 
 help:
-	@echo "make setup   create the venv and install deps (uv)"
+	@echo "make setup   create the venv and install deps (uv), and pull the local fallback model"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    run the thing end to end (needs a mic)"
@@ -10,11 +10,26 @@ help:
 	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 
+OLLAMA_MODEL := hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
+
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
 	uv sync
 	@test -f .env || { cp .env.example .env; echo "wrote .env from .env.example — fill it in"; }
+	@$(MAKE) --no-print-directory fallback-model
 	@echo "ok. next: make test"
+
+# The local LLM the turn falls back to when NIM rate-limits or the network is gone. A warning and
+# not a failure: without it the remote path still works, you just lose the turn instead of the
+# quality when the free tier refuses. ~2 GB, and `make demo` checks it is pulled before timing
+# anything rather than downloading it inside a turn that has already gone wrong.
+fallback-model:
+	@command -v ollama >/dev/null || { \
+		echo "warning: ollama not installed — the LLM stage will have no local fallback."; \
+		echo "         https://ollama.com/download, then: make fallback-model"; exit 0; }
+	@ollama list 2>/dev/null | grep -q "$(OLLAMA_MODEL)" \
+		|| ollama pull "$(OLLAMA_MODEL)" \
+		|| echo "warning: ollama pull failed — the LLM stage will have no local fallback."
 
 # The whole unit suite lives under tests/unit/, which is what VOX-007's gate command names. Gates
 # are a separate target because they make real calls and need the dev set on disk.
@@ -26,7 +41,9 @@ gate:
 	uv run pytest tests/gates -q
 
 # One chained turn: mic -> silero-vad -> whisper-large-v3-turbo -> Llama-3.1-8B -> Kokoro-82M.
-# Needs a working microphone and speakers. First run downloads the Kokoro weights (~350 MB).
+# The two middle stages are remote and fall back to local arms if their free tier refuses; startup
+# warms those fallbacks and warns if one is not ready. Needs a working microphone and speakers.
+# First run downloads the Kokoro weights (~350 MB) and the faster-whisper-base fallback (~150 MB).
 demo:
 	uv run python -m src.loop
 
