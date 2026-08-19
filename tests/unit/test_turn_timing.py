@@ -8,17 +8,10 @@ import json
 
 import pytest
 
-from src import telemetry
 from src.telemetry import TURN_FIELDS, TurnTimer, turn_timer
 from src.vad import Capture
 
-
-@pytest.fixture(autouse=True)
-def turns_log(tmp_path, monkeypatch):
-    """Never append to the real runs/turns.jsonl from a test."""
-    path = tmp_path / "turns.jsonl"
-    monkeypatch.setattr(telemetry, "TURNS_LOG", path)
-    return path
+# `turns_log` is autouse in tests/unit/conftest.py.
 
 
 def capture(speech_end_t, endpointed_t):

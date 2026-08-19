@@ -22,20 +22,7 @@ ALL_ARMS = [(stage, arm) for stage, stage_arms in ARMS.items() for arm in stage_
 ARM_IDS = [f"{stage}:{arm.alias}" for stage, arm in ALL_ARMS]
 
 
-@pytest.fixture(autouse=True)
-def calls_log(tmp_path, monkeypatch):
-    """Never append to the real runs/calls.jsonl from a test."""
-    path = tmp_path / "calls.jsonl"
-    monkeypatch.setattr(telemetry, "CALLS_LOG", path)
-    return path
-
-
-@pytest.fixture(autouse=True)
-def no_env_override(monkeypatch):
-    """A VOX_*_MODEL left in the shell must not change what the default-resolution tests see."""
-    for env in config.STAGE_ENV.values():
-        monkeypatch.delenv(env, raising=False)
-
+# `calls_log` and `no_env_override` are autouse in tests/unit/conftest.py.
 
 # --- the criterion -------------------------------------------------------------------------
 
