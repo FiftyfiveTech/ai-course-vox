@@ -26,6 +26,9 @@ other person as a collaborator with push access.
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
 | `sources/` | The PDF corpus the POC answers from. **Gitignored** — internal documents, see below. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
+| `docs/learning/` | Concept primers, retro ledger, and the coach lesson pages. |
+| `tools/coach/` | The web-coach bridge and the NotebookLM sync script. |
+| `docs/CONTRIBUTING.md` | Branches, PRs, review, merge — read before your first PR. |
 
 ## Deliberately missing
 
@@ -40,6 +43,12 @@ Write it. Do not import it from somewhere else.
 two logs joined by `turn_id` — `runs/calls.jsonl` (one line per model call, cost and provider
 latency) and `runs/turns.jsonl` (one line per turn, the five-field latency split). See the
 telemetry section of `ARCHITECTURE.md`.
+
+## Held-out seal
+
+`evals/heldout/labels.json` — 30 gold labels, sealed as tag `heldout-v1`.
+
+SHA-256: `030ca138283223f8d004071c7c92ed4343ff66b0ddffb0497c2eb59faa9438f9`
 
 ## Swapping models (VOX-006)
 
@@ -123,6 +132,30 @@ answer is refused by the model, and both say the same sentence out loud.
 
 Details and the measured numbers: the source-folder, retrieval and grounded-answer sections of
 `ARCHITECTURE.md`.
+
+## Learning: web coach and NotebookLM
+
+Each ticket ships a concept primer alongside the code, and two tools make them usable by
+someone who did not write the ticket:
+
+```bash
+make coach                                     # serve the lesson pages, 127.0.0.1:8765
+# open http://127.0.0.1:8765/vox-day1.html, then in Claude Code: "start web coach session"
+```
+
+The page shows the concept cards and a quiz; **DONE** sends every answer to Claude in one
+message, and Claude grades, argues back, and replies in the page's chat panel. The same page
+embeds short NotebookLM Video Overviews when they have been downloaded, and the shared
+notebook answers "why is TTS local?" in plain English with citations back to these docs.
+
+Setup (including the one-time `notebooklm login` and notebook creation), the sync script, and
+the rule about which files may never become a notebook source:
+[docs/learning/README.md](docs/learning/README.md).
+
+## Contributing
+
+Branch off `dev`, PR against `dev`, the other developer reviews and merges — never yourself.
+The full procedure, PR template and recovery steps: [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## Rules that live in this repo
 

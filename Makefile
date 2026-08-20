@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask answer board clean
+.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask answer board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -14,6 +14,7 @@ help:
 	@echo "make ask     Q=\"...\" retrieve the top chunks for a question, with file:page (VOX-030)"
 	@echo "make answer  Q=\"...\" the same chunks through the LLM arm, as a spoken answer (VOX-031)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
+	@echo "make coach   serve the interactive learning pages on 127.0.0.1:8765"
 
 OLLAMA_MODEL := hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
 
@@ -130,6 +131,12 @@ answer:
 board:
 	ODOO_URL=https://odoo.fiftyfivetech.io ODOO_DB=odoo-db ODOO_PROJECT_ID=60 \
 		python tools/board_mcp/odoo_board_mcp.py --selftest
+
+# The web-coach bridge: static lesson pages plus a chat file Claude watches. Stdlib only, so
+# no venv and no deps — it runs on any machine with python3. Bound to 127.0.0.1, never
+# exposed. Protocol and page contract: docs/learning/README.md and tools/coach/README.md.
+coach:
+	python3 tools/coach/server.py --dir docs/learning/coach --port 8765
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__
