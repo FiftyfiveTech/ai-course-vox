@@ -10,6 +10,7 @@ Phase 0 asks only for a reply. Structured intent extraction is VOX-019, so nothi
 entities — keeping the two apart means the Evaluator can tell which commit satisfied which gate.
 """
 import re
+from pathlib import Path
 
 import httpx
 
@@ -39,21 +40,35 @@ PROMPT_FILES = {
     "reply":    PROMPTS_DIR / "reply_v1.md",   # Phase-0 generic fallback
 }
 
+# YAML front matter is metadata *about* the prompt (version, the arm it was written against,
+# what supersedes it). No model ever sees it.
+FRONT_MATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
 # Default: the generic reply prompt keeps Phase-0 behaviour unchanged.
 _DEFAULT_STAGE = "reply"
 
 
 def load_prompt(stage=None):
-    """Load a versioned prompt file and strip its YAML front matter.
+    """-> a versioned prompt file's body, YAML front matter stripped. Never inlined in code.
+
+    Here rather than in each module that has a prompt: VOX-031 added a second prompt file, and two
+    copies of this regex is two places for "the front matter leaked into the system message" to
+    happen. The front matter is metadata *about* the prompt — version, the arm it was written
+    against, what supersedes it — and no model should ever see it.
 
     Args:
-        stage: one of the keys in PROMPT_FILES, or None for the default.
+        stage: one of the keys in PROMPT_FILES, a Path to a prompt file (VOX-031's answer prompt
+               is not a turn stage, so it is not in the table), or None for the default.
     Returns the system prompt string ready to pass to the LLM.
     """
-    key = stage if stage in PROMPT_FILES else _DEFAULT_STAGE
-    path = PROMPT_FILES[key]
-    text = path.read_text(encoding="utf-8")
-    return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
+    path = stage if isinstance(stage, Path) else PROMPT_FILES[
+        stage if stage in PROMPT_FILES else _DEFAULT_STAGE]
+    return FRONT_MATTER.sub("", path.read_text(encoding="utf-8")).strip()
+
+
+def system_prompt():
+    """The plain-reply prompt (VOX-018's reply_v1). VOX-031's answer prompt is in src/answer.py."""
+    return load_prompt()
 
 
 def messages(transcript, stage=None):

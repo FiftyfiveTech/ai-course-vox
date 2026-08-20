@@ -54,8 +54,12 @@ def show_table():
             where = "local" if a.local else "remote"
             print(f"{stage:<6}{a.repo_id:<45}{a.provider:<12}{a.backend:<22}{where:<7}"
                   f"{a.alias}{marks}")
+    # Read off the registry rather than restated: the counts moved once already (VOX-013 added the
+    # piper arm) and a hand-written "2 tts" then described a table that had three rows.
     counts = ", ".join(f"{len(v)} {k}" for k, v in ARMS.items())
-    print(f"\n{counts} — criterion is 3 stt, 2 tts, 2 llm")
+    minimums = {"stt": 3, "llm": 2, "tts": 2}
+    print(f"\n{counts} — VOX-006's criterion is at least "
+          + ", ".join(f"{n} {s}" for s, n in minimums.items()))
     print("pipeline: " + " -> ".join(f"{s} {p}" for s, p in PIPELINE.items()))
 
 

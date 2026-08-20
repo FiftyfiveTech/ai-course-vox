@@ -24,6 +24,7 @@ other person as a collaborator with push access.
 | `evals/dev/` | **Builder** tunes here. 15 cases. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
+| `sources/` | The PDF corpus the POC answers from. **Gitignored** — internal documents, see below. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
 | `docs/learning/` | Concept primers, retro ledger, and the coach lesson pages. |
 | `tools/coach/` | The web-coach bridge and the NotebookLM sync script. |
@@ -90,6 +91,46 @@ arm for its `Retry-After` window so the next turn does not pay another doomed ro
 
 The LLM fallback needs ollama and one ~2 GB pull; `make setup` does it, and warns rather than fails
 if ollama is absent. Full rules, trigger table and measured numbers: the fallback section of
+`ARCHITECTURE.md`.
+
+## Answering from a folder of PDFs (POC)
+
+```bash
+make tokenizer   # once — caches the tokenizer the chunker counts with (~9 MB)
+make index       # sources/*.pdf -> runs/chunks.jsonl, and prints the counts
+```
+
+`make index` extracts every PDF page by page and cuts it into 300-token chunks with 50 tokens of
+overlap, each carrying the `doc_id` and `page` it came from so a spoken answer can say where it
+came from. No network, no model call, no key. Pages that yield **no** text are printed by name:
+on a scanned PDF that is the whole corpus, and it has to be visible at load rather than as an
+empty answer later.
+
+`sources/` and the chunk file are gitignored — the corpus is internal company documentation, and
+the extracted text is the same disclosure as the PDFs. A clean clone has nothing to index until
+someone puts documents there.
+
+`make ask Q="..."` retrieves over those chunks: BM25, the top 5 with `doc_id:page`, `chunk_idx` and
+a score, or **"not in the documents"** when the best score does not clear the measured floor. Still
+no network, no model call, no key.
+
+```bash
+make answer Q="how many casual leaves am I entitled to in a year"
+LLM=llama-3.2-3b make answer Q="..."      # answer with a different arm
+```
+
+`make answer` sends those same chunks to the LLM arm with `prompts/answer_from_source_v1.md` —
+answer only from these excerpts, or say you could not find it — and prints the spoken answer, the
+`doc_id:page` it was grounded in, and the `turn_id` joining the run to its `runs/calls.jsonl` line.
+It goes through `arms.llm`, so the cost logger, the `--llm` flag and the local fallback all apply;
+it is the one command here that needs a key.
+
+There are two ways it declines, and the output says which. A question that clears no chunk is
+refused with **no model call at all** — there is nothing to be grounded in, so there is nothing for
+a model to do but invent. A question whose chunks clear the floor and still do not contain the
+answer is refused by the model, and both say the same sentence out loud.
+
+Details and the measured numbers: the source-folder, retrieval and grounded-answer sections of
 `ARCHITECTURE.md`.
 
 ## Learning: web coach and NotebookLM

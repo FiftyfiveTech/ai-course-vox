@@ -23,9 +23,18 @@ dependencies = [
     # microsoft/speecht5_tts need no new modelling dep; these three are what the arms add.
     "faster-whisper>=1.0",  # Systran/faster-whisper-base — the CTranslate2 runtime
     "sentencepiece>=0.2",   # SpeechT5Tokenizer refuses to load without it
+    # rhasspy/piper-voices — the fast leg of VOX-013's TTS contrast, and the only TTS arm here
+    # that is actually faster than Kokoro (speecht5 is slower). Brings onnxruntime with it; the
+    # voice weights themselves come from the HF repo id at run time, not from this package.
+    "piper-tts>=1.7",
     # Arrives with transformers, but src/tts.py imports it directly to pull the SpeechT5 speaker
     # embedding out of a dataset repo's zip, and an undeclared transitive dep is a trap.
     "huggingface-hub>=0.23",
+    "pypdf>=6.16.1",
+    # VOX-030's Okapi BM25 scorer. Pure Python over the numpy above, so retrieval has no network at
+    # query time; a scorer and not a model, so the HF-repo-id rule does not apply to it any more
+    # than it does to pypdf.
+    "rank-bm25>=0.2.2",
 ]
 
 [dependency-groups]

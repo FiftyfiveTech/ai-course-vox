@@ -1,0 +1,41 @@
+{
+  "_note": [
+    "VOX-030. Tuning queries for one thing only: picking config.RETRIEVAL_SCORE_FLOOR, the BM25",
+    "score below which retrieve() returns nothing so that 'not in these documents' is a real",
+    "answer state. Run with: uv run python scripts/ask.py --calibrate",
+    "",
+    "This is NOT VOX-033's gate set. That is evals/dev/pdf_queries.json, it is the Evaluator's to",
+    "write, and it scores correct-source@k rather than calibrating a threshold. Keeping them in",
+    "separate files so tuning the floor here cannot quietly move the gate's number there.",
+    "",
+    "Dev only. evals/heldout/ is sealed as heldout-v1 and holds zero document queries; it is not",
+    "opened for this, so the POC has no held-out retrieval number and says so.",
+    "",
+    "The misses are deliberately HR-shaped and share vocabulary with the corpus ('leave', 'days',",
+    "'reimbursed', 'company', 'employee'). A miss written in unrelated words would clear any floor",
+    "and prove nothing — the whole difficulty is a plausible question the documents do not answer.",
+    "",
+    "expect_doc is a list because two of these questions are answered in more than one document,",
+    "and both were written wrong first: the referral bonus release condition is stated verbatim in",
+    "separation-policy p21 as well as in referral-policy, and the 2026 holiday calendar is printed",
+    "in full in holiday-policy p5 as well as in holiday-list-2026. Both chunks were read before the",
+    "list was widened — the label was wrong about the corpus, retrieval was right."
+  ],
+  "hit": [
+    { "q": "how many casual leaves am I entitled to in a year", "expect_doc": ["leave-policy"] },
+    { "q": "what notice period do I serve when I resign", "expect_doc": ["separation-policy"] },
+    { "q": "how long is the probation period for a new joiner", "expect_doc": ["probation-period"] },
+    { "q": "how much is the employee referral bonus and when is it paid", "expect_doc": ["referral-policy", "separation-policy"] },
+    { "q": "who do I report a sexual harassment complaint to", "expect_doc": ["prevention-of-sexual-harassment-policy"] },
+    { "q": "which day of the week is Diwali on the holiday list", "expect_doc": ["holiday-list-2026", "holiday-policy", "holiday-policy-2"] },
+    { "q": "am I responsible for the laptop assigned to me", "expect_doc": ["assets-policy"] }
+  ],
+  "miss": [
+    { "q": "how do I enrol in the employee stock option plan" },
+    { "q": "is a gym membership reimbursed by the company" },
+    { "q": "does the company sponsor a work visa for relocation to Canada" },
+    { "q": "what is the tuition reimbursement for a part time degree" },
+    { "q": "how many days of sabbatical leave can I take" },
+    { "q": "is there a canteen subsidy for lunch on working days" }
+  ]
+}

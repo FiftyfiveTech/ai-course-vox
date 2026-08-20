@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model test gate demo barge turn arms board coach clean
+.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask answer board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -9,6 +9,10 @@ help:
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
 	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
+	@echo "make compare two whole architectures end to end, five-stage split for both (VOX-013)"
+	@echo "make index   extract the sources/ PDFs to text chunks and print the counts (VOX-029)"
+	@echo "make ask     Q=\"...\" retrieve the top chunks for a question, with file:page (VOX-030)"
+	@echo "make answer  Q=\"...\" the same chunks through the LLM arm, as a spoken answer (VOX-031)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 	@echo "make coach   serve the interactive learning pages on 127.0.0.1:8765"
 
@@ -19,6 +23,7 @@ setup:
 	uv sync
 	@test -f .env || { cp .env.example .env; echo "wrote .env from .env.example — fill it in"; }
 	@$(MAKE) --no-print-directory fallback-model
+	@$(MAKE) --no-print-directory tokenizer
 	@echo "ok. next: make test"
 
 # The local LLM the turn falls back to when NIM rate-limits or the network is gone. A warning and
@@ -32,6 +37,13 @@ fallback-model:
 	@ollama list 2>/dev/null | grep -q "$(OLLAMA_MODEL)" \
 		|| ollama pull "$(OLLAMA_MODEL)" \
 		|| echo "warning: ollama pull failed — the LLM stage will have no local fallback."
+
+# The tokenizer the chunker counts with (config.TOKENIZER_REPO). `make index` loads it with
+# local_files_only, so it has to be cached before an index build — that is what keeps "no network
+# calls" true of the build itself rather than only of the second build onwards. ~9 MB, and unlike
+# the fallback model this one is a hard requirement: without it there is no index.
+tokenizer:
+	uv run python -c "from src.sources import fetch_tokenizer; fetch_tokenizer()"
 
 # The whole unit suite lives under tests/unit/, which is what VOX-007's gate command names. Gates
 # are a separate target because they make real calls and need the dev set on disk.
@@ -68,6 +80,51 @@ turn:
 # (~1.1 GB); `make demo` does not, because the defaults are unchanged.
 arms:
 	uv run python scripts/check_arms.py
+
+# VOX-013. Two complete pipelines as real turns, three times each, interleaved, then the five-field
+# VOX-003 split for both. Not the same question as `make arms`: that times stages, this times
+# architectures, and the gaps between the calls belong to no call.
+#
+# Needs, or a column comes back FAILED:
+#   arm "fast"     the ollama daemon up with the 3B pulled — `make fallback-model`
+#   arm "quality"  GROQ_API_KEY and NVIDIA_API_KEY in .env
+#   both           a working speaker. time_to_first_audio_ms is not measurable without one, and
+#                  five stages is the criterion — `--silent` deliberately fails it.
+# First run downloads the piper voice (~65 MB).
+compare:
+	uv run python scripts/compare_arms.py
+
+# VOX-029. Every PDF in sources/ to runs/chunks.jsonl, then the counts read back off the file:
+# files, pages, chunks, and every page that produced no text by name. No network and no model call
+# — pypdf parses, and the tokenizer only counts. The folder is gitignored (internal HR policies),
+# so a clean clone has nothing to index until someone puts the corpus there.
+index:
+	uv run python scripts/build_index.py
+
+# VOX-030. BM25 over runs/chunks.jsonl: the top 5 chunks for Q, each with doc:page, chunk_idx and
+# score, or "not in the documents" when the best score does not clear config.RETRIEVAL_SCORE_FLOOR.
+# Needs `make index` to have run. No model, no network, no key — this stage writes no cost log line
+# because there is no provider to name.
+#
+#   make ask Q="how many casual leaves am I entitled to in a year"
+#
+# `--calibrate` instead of a Q re-measures the floor over evals/dev/retrieval_floor_queries.json.
+ask:
+	@test -n "$(Q)" || { echo 'usage: make ask Q="how many casual leaves do I get"'; exit 1; }
+	uv run python scripts/ask.py "$(Q)"
+
+# VOX-031. The same retrieval, then the chunks that cleared the floor go to the LLM arm with
+# prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.
+# Prints the spoken answer, the doc:page it was grounded in, and the turn_id that joins this run to
+# its runs/calls.jsonl line. The one path in this script that makes a model call, so it needs a key
+# — NVIDIA_API_KEY for the default arm, and it falls back to the local ollama arm if the free tier
+# refuses. A query that clears no chunk is refused here with no call at all.
+#
+#   make answer Q="how many casual leaves am I entitled to in a year"
+#   LLM=gpt-oss make answer Q="..."      answer with a different arm
+answer:
+	@test -n "$(Q)" || { echo 'usage: make answer Q="how many casual leaves do I get"'; exit 1; }
+	uv run python scripts/ask.py "$(Q)" --answer $(if $(LLM),--llm $(LLM),)
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.

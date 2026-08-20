@@ -1,9 +1,9 @@
-"""Text-to-speech backends: hexgrad/Kokoro-82M and microsoft/speecht5_tts, both local. No spend.
+"""Text-to-speech backends: Kokoro-82M, speecht5_tts and piper-voices, all local. No spend.
 
 Backends return samples rather than playing them, because VOX-011 (barge-in) has to be able to
 interrupt playback without touching synthesis. They return them at their **own** sample rate —
-Kokoro is 24 kHz and SpeechT5 16 kHz — and `arms.tts()` hands the rate on with the audio. Resampling
-one to match the other would put a lie in the middle of a comparison of the two.
+Kokoro 24 kHz, SpeechT5 16 kHz, piper 22.05 kHz — and `arms.tts()` hands the rate on with the audio.
+Resampling one to match another would put a lie in the middle of a comparison of the two.
 """
 import io
 from pathlib import Path
@@ -93,5 +93,46 @@ def speecht5(arm, text, rec):
     return _measured(audio, arm, rec)
 
 
-BACKENDS = {"kokoro": kokoro, "speecht5": speecht5}
-LOADERS = {"kokoro": load_kokoro, "speecht5": load_speecht5}
+def load_piper(arm):
+    """The pinned voice's .onnx and its .onnx.json, straight out of the HF repo. ~65 MB once.
+
+    Both files are named in config.py rather than derived from a voice string here, because
+    `rhasspy/piper-voices` holds ~120 voices and the repo id alone therefore does not say what will
+    speak. Same reason the SpeechT5 speaker embedding is pinned by filename.
+
+    The sample rate is read back off the .onnx.json and checked against the arm's declared one. The
+    arm's number is what `arms.tts()` hands the speaker and what a comparison against Kokoro is
+    normalised on, so a silent disagreement would not be a wrong log line — it would play every
+    piper reply at the wrong pitch.
+    """
+    if arm.id not in _loaded:
+        from huggingface_hub import hf_hub_download
+        from piper import PiperVoice
+
+        onnx = hf_hub_download(arm.repo_id, arm.extra["onnx"])
+        config = hf_hub_download(arm.repo_id, arm.extra["onnx_config"])
+        voice = PiperVoice.load(onnx, config_path=config)
+        declared, actual = arm.extra["sample_rate"], voice.config.sample_rate
+        if actual != declared:
+            raise RuntimeError(
+                f"{arm.id} declares sample_rate={declared} but {arm.extra['onnx_config']} says "
+                f"{actual}. Fix the config.py row — playback and every arm comparison read the "
+                f"declared number."
+            )
+        _loaded[arm.id] = voice
+    return _loaded[arm.id]
+
+
+def piper(arm, text, rec):
+    """-> float32 mono at 22.05 kHz. One chunk per sentence, concatenated."""
+    voice = load_piper(arm)
+    # The same field Kokoro fills with af_heart and SpeechT5 with its xvector name: who spoke.
+    rec["voice"] = Path(arm.extra["onnx"]).stem
+    parts = [chunk.audio_float_array for chunk in voice.synthesize(text)]
+    if not parts:
+        raise RuntimeError(f"piper produced no audio for {text!r}")
+    return _measured(np.concatenate(parts).astype(np.float32), arm, rec)
+
+
+BACKENDS = {"kokoro": kokoro, "speecht5": speecht5, "piper": piper}
+LOADERS = {"kokoro": load_kokoro, "speecht5": load_speecht5, "piper": load_piper}
