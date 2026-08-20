@@ -27,7 +27,7 @@ class Arm:
     """One model, pinned to the provider that serves it on a free tier."""
 
     def __init__(self, repo_id, provider, provider_model, backend, alias,
-                 api_base=None, key_env=None, **extra):
+                 api_base=None, key_env=None, local=None, **extra):
         self.repo_id = repo_id            # the only name we speak out loud
         self.provider = provider          # where it runs
         self.provider_model = provider_model
@@ -35,6 +35,11 @@ class Arm:
         self.alias = alias                # short name for the CLI; the repo id always works too
         self.api_base = api_base
         self.key_env = key_env
+        # Whether the weights run on this machine — the thing PIPELINE and FALLBACKS are about.
+        # Usually the same question as `provider == "local"`, but not always: the ollama arm runs
+        # locally and still speaks HTTP to a daemon on localhost, so it has a provider name of its
+        # own and says so explicitly. Nothing infers locality from the provider string any more.
+        self.local = (provider == "local") if local is None else local
         # Backend-specific pins that are still part of *which model this is* — a vocoder repo, a
         # quantisation, a native sample rate. They belong to the registry for the same reason the
         # provider's model string does: so no other file has to name them.
@@ -61,9 +66,30 @@ class Arm:
             )
         return k
 
+    @property
+    def timeout_s(self):
+        """How long this arm gets to answer. Local arms get far longer — see LOCAL_TIMEOUT_S."""
+        return LOCAL_TIMEOUT_S if self.local else REMOTE_TIMEOUT_S
+
+    def auth_headers(self, extra=None):
+        """-> request headers, with Authorization only when this arm has a credential.
+
+        The ollama arm speaks HTTP with no key at all. Sending `Bearer None` at it is the kind of
+        thing that works until a server decides to validate the header, so the header is omitted
+        rather than filled with a placeholder.
+        """
+        headers = dict(extra or {})
+        k = self.key()
+        if k is not None:
+            headers["Authorization"] = f"Bearer {k}"
+        return headers
+
 
 GROQ = "https://api.groq.com/openai/v1"
 NIM = "https://integrate.api.nvidia.com/v1"
+# The ollama daemon's OpenAI-compatible endpoint. Local, but over HTTP — hence an api_base and a
+# provider of its own rather than provider="local", which means "loaded in this process".
+OLLAMA = os.environ.get("VOX_OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/v1"
 
 # --- the arms (VOX-006) --------------------------------------------------------------------
 # First entry per stage is the default, and the defaults are the arms VOX-002/VOX-003 measured.
@@ -107,6 +133,14 @@ LLM_ARMS = (
     Arm(repo_id="meta-llama/Llama-3.1-70B-Instruct", provider="nvidia-nim",
         provider_model="meta/llama-3.1-70b-instruct", backend="openai-chat", alias="llama-70b",
         api_base=NIM, key_env="NVIDIA_API_KEY"),
+    # The stage's local fallback, and the only local LLM arm. Ollama serves the same
+    # OpenAI-compatible /chat/completions the two hosted arms speak, so it costs no new adapter —
+    # `openai_chat` just has to stop sending an Authorization header it has no key for.
+    # Same Llama family as the default on purpose: when the free tier refuses, the reply should
+    # sound like a smaller version of the usual voice, not a different assistant.
+    Arm(repo_id="hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF", provider="ollama",
+        provider_model="hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M",
+        backend="ollama-chat", alias="llama-3.2-3b", api_base=OLLAMA, local=True),
 )
 
 TTS_ARMS = (
@@ -128,6 +162,40 @@ ARMS = {"stt": STT_ARMS, "llm": LLM_ARMS, "tts": TTS_ARMS}
 STAGE_ENV = {"stt": "VOX_STT_MODEL", "llm": "VOX_LLM_MODEL", "tts": "VOX_TTS_MODEL"}
 
 DEFAULT_STT, DEFAULT_LLM, DEFAULT_TTS = STT_ARMS[0], LLM_ARMS[0], TTS_ARMS[0]
+
+# --- where each stage runs -------------------------------------------------------------------
+# The architecture, written down as something that can fail a test. Until this table existed the
+# placement was only a consequence of which row happened to be first in each tuple above, so
+# reordering a table moved a stage across the network boundary and nothing said so.
+#
+# The reasoning behind the placement, so a future reorder is a decision and not a slip:
+#   vad   local — runs per 32 ms frame; a network hop per frame is not a design, it is a bill
+#   stt   remote — the local `base` arms drop the first word of the fixture (see ARCHITECTURE.md)
+#   llm   remote — the widest quality gap of the four, and the least tolerable to lose
+#   tts   local — no key, no quota, and the arm is already good enough to ship
+PIPELINE = {"vad": "local", "stt": "remote", "llm": "remote", "tts": "local"}
+
+# Where a stage goes when its arm fails in a way another arm could survive. Every value must name
+# a *local* arm on the same stage; tests/unit/test_fallback.py asserts exactly that, because a
+# fallback that is itself remote would fail for the same reason the primary just did.
+FALLBACKS = {"stt": "faster-base", "llm": "llama-3.2-3b", "tts": "speecht5"}
+
+# How long a rate-limited arm stays out of rotation when the provider sent no Retry-After. Long
+# enough that a free tier is not poked once per turn, short enough that one 429 does not exile the
+# good arm for the rest of a demo.
+DEFAULT_COOLDOWN_S = 60.0
+
+# How long a hosted arm gets before the turn gives up on it. Was 30 s for STT and 60 s for the LLM,
+# which were fine when a timeout meant the turn was over anyway. Now that a timeout has somewhere to
+# go, the wait is pure added latency in front of a local arm that would have answered — against a
+# 2 s budget, waiting a minute to find out is worse than being wrong quickly.
+REMOTE_TIMEOUT_S = float(os.environ.get("VOX_REMOTE_TIMEOUT_S", "10"))
+
+# A local arm over HTTP gets its own, much longer budget. Giving up on it early is not a fallback,
+# it is just a lost turn — there is nowhere further to go, and no free tier to be polite to. Ollama
+# also pages a 2 GB model into memory on a cold call, which alone exceeds the remote budget; that
+# load is what `nlu.load_ollama` moves out of the turn, and this is the belt to its braces.
+LOCAL_TIMEOUT_S = float(os.environ.get("VOX_LOCAL_TIMEOUT_S", "120"))
 
 
 def resolve(stage, model_id=None):
@@ -196,6 +264,27 @@ VAD_MAX_UTTERANCE_MS = 15_000  # hard stop so a stuck mic cannot hang the loop
 # 1100 is the smallest value tested that clears a natural pause. It costs ~400 ms of extra
 # trailing silence on every turn, which lands in time_to_first_audio when VOX-003 measures it.
 VAD_SILENCE_MS = 1_100
+
+# --- barge-in (VOX-011; VOX-012 lifts these into the same config file) -----------------------
+# The endpointer decides where a turn *ends*. These two decide when a reply gets *cut*, which is a
+# different trade: endpointing may take a second to be sure, and barge-in may not.
+#
+# PROVISIONAL — neither is measured on VOX-004's 45 utterances yet, and VOX-012 must re-tune both
+# and print the numbers it chose.
+#
+# How much speech has to accumulate before the reply is stopped. Cutting on the very first speech
+# frame would give the fastest possible stop and would also let a cough, a chair or a door kill
+# every reply. This is that trade, made explicitly: the stop latency printed on the turn record is
+# measured from the *first* speech frame, so whatever is set here is visible in the number rather
+# than hidden inside it.
+BARGE_MIN_SPEECH_MS = 200
+
+# Higher than VAD_SPEECH_THRESHOLD on purpose, and for one reason only: there is no acoustic echo
+# cancellation in this pipeline. On open speakers silero hears Kokoro and the reply interrupts
+# itself. A stricter threshold reduces how often that happens; it does not fix it, and no value here
+# fixes it, because speaker bleed is real speech as far as a VAD is concerned. The demo machine runs
+# on headphones — see notes/ and ARCHITECTURE.md.
+BARGE_SPEECH_THRESHOLD = 0.7
 
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "

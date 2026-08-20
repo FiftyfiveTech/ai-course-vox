@@ -27,15 +27,15 @@ def _wav_bytes(segment):
     return buf.getvalue()
 
 
-def openai_audio(arm, segment, rec, timeout=30):
+def openai_audio(arm, segment, rec, timeout=None):
     """OpenAI-compatible /audio/transcriptions — Groq's free tier serves both whisper arms here."""
     r = httpx.post(
         f"{arm.api_base}/audio/transcriptions",
-        headers={"Authorization": f"Bearer {arm.key()}"},
+        headers=arm.auth_headers(),
         files={"file": ("turn.wav", _wav_bytes(segment), "audio/wav")},
         data={"model": arm.provider_model, "response_format": "json",
               "temperature": "0", "language": STT_LANGUAGE},
-        timeout=timeout,
+        timeout=arm.timeout_s if timeout is None else timeout,
     )
     errors.check(r, arm, rec)
     text = (r.json().get("text") or "").strip()

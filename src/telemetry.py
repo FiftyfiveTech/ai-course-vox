@@ -23,7 +23,10 @@ CALLS_LOG = RUNS_DIR / "calls.jsonl"
 TURNS_LOG = RUNS_DIR / "turns.jsonl"
 
 # Free-tier endpoints and local weights. Anything not on this list is a STOP-and-ask.
-FREE_TIERS = {"groq": "free-tier", "nvidia-nim": "free-tier", "local": "local-weights"}
+# ollama is "local-weights" like `local` is: the weights are on this machine and no one is billed.
+# It has a name of its own only because it is reached over HTTP rather than loaded in-process.
+FREE_TIERS = {"groq": "free-tier", "nvidia-nim": "free-tier", "local": "local-weights",
+              "ollama": "local-weights"}
 
 
 def new_turn_id():
@@ -116,6 +119,49 @@ class TurnTimer:
             if stage not in self.ms:
                 raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
             self.extra[f"{stage}_model"] = arm.id if hasattr(arm, "id") else arm
+
+    def fallback(self, stage, from_arm, to_arm, reason, failed_ms=None):
+        """A stage did not run on the arm this turn was started with. Rewrite the record to say so.
+
+        `arms()` stamps `<stage>_model` before the turn begins, from what was *selected*. After a
+        fallback that field would name an arm that never ran, and VOX-013's per-turn comparison
+        reads exactly that field — so the wrong model would get the credit for the latency.
+
+        `<stage>_failed_ms` is the other half. `t_<stage>_ms` now spans the dead remote round-trip
+        plus the local call, which is honest about what the user waited for but would otherwise
+        attribute a provider timeout to local inference. The breakdown keeps both readable.
+        """
+        if stage not in self.ms:
+            raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
+        self.extra[f"{stage}_model"] = to_arm.id
+        self.extra[f"{stage}_fallback_from"] = from_arm.id
+        self.extra[f"{stage}_fallback_reason"] = reason
+        self.extra[f"{stage}_failed_ms"] = failed_ms
+        self.extra.setdefault("fell_back", []).append(stage)
+
+    def barge(self, stop_ms, played_s, reply_s, out_latency_s=None):
+        """The user talked over this reply and it was cut short (VOX-011).
+
+        `stop_ms` is measured from the first speech frame, not from the moment the decision was
+        made, so BARGE_MIN_SPEECH_MS is inside the number rather than hidden behind it. It is the
+        interval between the user starting to speak and VOX stopping sending samples.
+
+        `out_latency_s` is the output device's buffer, which `abort()` cannot recall. Recorded
+        beside the stop latency because the two together bound what the user actually heard, and
+        without it the printed number reads as silence-by-then, which it is not.
+
+        The five-field split is untouched: this turn ran every stage and did reach first audio, so
+        it stays in the latency percentiles the phase gates read. Being interrupted is a fact about
+        the reply, not a failed turn.
+        """
+        self.extra["barged_in"] = True
+        self.extra["barge_stop_ms"] = stop_ms
+        self.extra["played_s"] = played_s
+        self.extra["reply_s"] = reply_s
+        self.extra["cut_s"] = round(reply_s - played_s, 3)
+        # Written even when unknown, for the reason TURN_FIELDS gives: a field that vanishes when it
+        # was not measured reads as a zero-length tail, which is the flattering answer.
+        self.extra["out_latency_s"] = out_latency_s
 
     def vad(self, capture):
         """Adopt the endpointer's marks: t_vad, and the origin the whole turn is measured from."""

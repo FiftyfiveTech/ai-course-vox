@@ -31,25 +31,36 @@ confirmation from the user.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  User speaks  →  VAD detects end-of-utterance                       │
+│  User speaks  →  [VAD] silero-vad                    LOCAL          │
 │       ↓                                                             │
-│  [STT]  whisper-large-v3-turbo  (via Groq free tier)                │
-│       ↓                                                             │
-│  [NLU / entity extraction]  LLM (NVIDIA NIM free tier)              │
+│  [STT]  whisper-large-v3-turbo (Groq free tier)      REMOTE         │
+│       ↓                            └─ on failure ──> faster-whisper-base   LOCAL
+│  [NLU / entity extraction]  LLM (NVIDIA NIM)         REMOTE         │
 │       structured output validated against schemas/                  │
-│       ↓                                                             │
+│       ↓                            └─ on failure ──> Llama-3.2-3B (ollama) LOCAL
 │  [Confirmation check]  — required for every write action            │
 │       if needed → TTS response asking "Did you mean …?"             │
 │       ↓ (confirmed, or read-only)                                   │
 │  [Action]  internal tool / API call                                 │
 │       ↓                                                             │
-│  [TTS response]  read result back to user                           │
-│       ↓                                                             │
+│  [TTS response]  Kokoro-82M                          LOCAL          │
+│       ↓                            └─ on failure ──> speecht5, then text   LOCAL
 │  Wait for next utterance (barge-in allowed — see below)             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 One turn = one VAD segment → STT → NLU → (confirm?) → action → TTS.
+
+**Why the stages sit where they do.** The placement is in `config.PIPELINE` and
+`tests/unit/test_fallback.py` asserts each stage's default arm against it, so a table reorder in
+`config.py` can no longer move a stage across the network boundary unnoticed.
+
+| Stage | Placement | Why |
+|---|---|---|
+| VAD | local | runs per 32 ms frame; a network hop per frame is not a design |
+| STT | remote | both local `base` arms drop the first word of the fixture — measured, see below |
+| LLM | remote | the widest quality gap of the four, and the least tolerable to lose |
+| TTS | local | no key, no quota, and Kokoro is already good enough to ship |
 
 ---
 
@@ -103,6 +114,91 @@ callback stamp is the first audio rather than the moment playback was queued.
 
 ---
 
+## Fallback and cooldown
+
+The two remote stages degrade to a local arm rather than losing the turn. `config.FALLBACKS` names
+one **local** arm per stage; `src/arms.py` applies it at the single dispatch point every model call
+already crosses, so the rule is written once rather than per stage.
+
+### What falls back, and what deliberately does not
+
+`errors.is_transient` is the whole rule. It is narrow on purpose — what is excluded matters as much
+as what is included, because a fallback is a way to make a failure invisible.
+
+| Failure | Falls back | Why |
+|---|---|---|
+| 429 rate limit | yes | the expected free-tier failure; a pace limit, not a bug |
+| Timeout / connection error | yes | the offline case, and the one most likely to happen in a live demo |
+| 5xx | yes | the provider's side, not the request |
+| **401 / any 4xx** | **no** | a bad key or a model off the catalogue. A local arm would return a plausible transcript and leave the broken credential to be found days later in a WER table |
+| **Missing credential** | **no** | STOP-and-ask under CLAUDE.md. Running locally instead is how you never notice the free tier was never configured |
+| **Empty reply from a reasoning arm** | **no** | a misconfigured arm — it would fail again next turn, so routing around it hides a permanent problem as a flaky one |
+
+Both attempts are logged. The refusal is a `calls.jsonl` line with `ok:false`, and the local call is
+a second line carrying `fallback_for: <failed arm id>`. If the fallback also fails, the **original**
+exception propagates with the local one chained: the free tier refusing is the cause, and the local
+arm failing behind it is a second symptom of the same turn.
+
+### Cooldown
+
+A 429 carries a `Retry-After`, and `src/cooldown.py` parks that arm for exactly that window
+(`DEFAULT_COOLDOWN_S`, 60 s, when the provider does not say). Subsequent turns skip the parked arm
+entirely and go straight to local, then return to remote on their own when the window lifts.
+
+Without this, a rate-limited session pays a doomed round-trip on every single turn — latency the
+user waits for nothing, and the pattern that turns a pace limit into a shut-off. In-memory and
+process-local by design: a persisted cooldown would open a demo with an arm parked an hour ago.
+
+`REMOTE_TIMEOUT_S` dropped to 10 s (was 30 s for STT, 60 s for the LLM) as part of this. Those
+values were fine when a timeout meant the turn was over anyway; now that a timeout has somewhere to
+go, the wait is pure added latency in front of an arm that would have answered.
+
+### What it costs when it fires
+
+A fallback turn is **not comparable to a clean one** and the record says so, in three places: the
+human-readable line ends `[fell back: stt]`, the turn record carries `fell_back`, and the gate
+prints a `FELL BACK` block. `<stage>_model` is rewritten to the arm that actually ran — otherwise
+VOX-013's per-turn comparison would credit the wrong model with the latency.
+
+`t_<stage>_ms` spans the dead round-trip *plus* the local call. That total is honest about what the
+user waited for, so `<stage>_failed_ms` breaks out the failed attempt separately; without it a
+provider timeout reads as slow local inference.
+
+**The STT fallback is a worse transcript, not a cheaper identical one.** Both local `base` arms
+return `'So this is testing.'` where the Groq `large-v3` arms return `'Hello. So this is testing.'`
+— they drop the word that starts the turn, identically across both measured runs (see the arms table
+below). `faster-base` is the fallback rather than `whisper-base` because it is 2.4–5.7× faster for a
+character-identical result, but the accuracy cost is real and is the reason STT is remote by default.
+
+### Measured, n=1, 2026-08-19
+
+One turn on `tests/fixtures/hello_testing_voice.mp3` on each path, same clip and same machine.
+The clean run is `uv run python scripts/turn_from_fixture.py --silent`; the fallback run is the
+same turn with both remote `api_base` values pointed at `http://127.0.0.1:1/v1`.
+
+| | clean | both free tiers unreachable |
+|---|---|---|
+| STT | 345 ms — `whisper-large-v3-turbo` @ groq | 3430 ms = **2064 ms** dead round-trip + 1357 ms `faster-whisper-base` |
+| LLM | 684 ms — `Llama-3.1-8B` @ nvidia-nim | 7513 ms = **2087 ms** dead round-trip + 5415 ms `Llama-3.2-3B` @ ollama |
+| TTS | 3709 ms — `Kokoro-82M` | 12545 ms — `Kokoro-82M`, no fallback needed |
+| transcript | `'Hello. So this is testing.'` | `'So this is testing.'` — the first word is gone |
+
+n=1, and every stage in this repo varies by 2–4× across runs, so read these as orders of magnitude.
+Two things they do establish:
+
+1. **The turn survives, and the reply is real.** Both free tiers refusing produced a spoken answer
+   rather than a dead turn, which is the whole point of the change.
+2. **A fallback is not free.** The local LLM is ~8× the remote one's call time here, and on top of
+   that the turn pays the failed attempt. A connection *refused* returns in ~2 s; a connection that
+   hangs instead costs `REMOTE_TIMEOUT_S` (10 s) before the local arm starts. Cooldown is what stops
+   that being paid once per turn.
+
+The ollama arm's ~5 s load is warmed at startup by `nlu.load_ollama` and `arms.warm_fallbacks`, so
+it is not in the 5415 ms above. Without that warm-up it would land inside `t_llm`, on the one turn
+least able to afford it.
+
+---
+
 ## Barge-in
 
 Barge-in = user speaks while TTS is still playing.
@@ -110,10 +206,53 @@ Barge-in = user speaks while TTS is still playing.
 - VAD runs continuously, not only after TTS finishes.
 - When VAD detects speech during TTS playback, TTS is **immediately interrupted**.
 - The new utterance is queued and processed as the next turn.
-- Implementation: the TTS playback thread is killed; VAD segment is handed off to the turn loop.
 
 Barge-in interrupt point: **between TTS playback start and TTS playback end**.
 No partial transcriptions are discarded; the full new utterance is captured before STT runs.
+
+### How it is actually built (VOX-011)
+
+The draft said *"the TTS playback thread is killed"*. Nothing is killed, and no thread is started:
+playback already runs on the output device's own callback thread, so the mic loop keeps the main
+thread and `Playback.abort()` stops the device from being handed any more samples. `abort()` and not
+`stop()` — stop drains the buffer first, which is the opposite of interrupting.
+
+There is also no second listener. The ordinary endpointer runs across the whole reply and past it,
+so the utterance that interrupts a reply is captured by the same `listen()` call that was watching
+for it, and is handed to the next turn as its input. An interruption and a polite next utterance are
+therefore the same code path; they differ only in whether anything was still playing when the speech
+arrived, which is what `abort()` returning `None` reports.
+
+Two streams, not one duplex stream: the mic is 16 kHz for silero and whisper, Kokoro emits 24 kHz,
+and a duplex stream takes a single sample rate — so one stream would mean resampling the reply to
+match the microphone. Confirmed working on this machine before anything was written.
+
+**Two knobs, both PROVISIONAL until VOX-012 tunes them on the dev set:**
+
+| | | why it exists |
+|---|---|---|
+| `BARGE_MIN_SPEECH_MS` | 200 | speech that must accumulate before a reply is cut. Cutting on the first speech frame is faster and lets a cough kill every reply |
+| `BARGE_SPEECH_THRESHOLD` | 0.7 | stricter than `VAD_SPEECH_THRESHOLD`, because this decision fires while the speaker is running |
+
+Stop latency is measured **from the first speech frame**, not from the moment the decision was made,
+so `BARGE_MIN_SPEECH_MS` is visible inside the printed number instead of hidden behind it.
+
+**No acoustic echo cancellation, and none is in scope.** On open speakers silero hears Kokoro and
+the reply interrupts itself, every time. The threshold and the confirmation window reduce how often
+that happens; neither fixes it, and no value fixes it, because speaker bleed is real speech as far as
+a VAD is concerned. Real AEC means a webrtc/speexdsp dependency and a separate ticket. **The demo
+machine runs on headphones**, and VOX-026's dry-run has to be done on the demo hardware for exactly
+this reason.
+
+What `abort()` cannot recall is the output device's own buffer — 0.182 s on this machine's MME
+device, which is larger than the stop latency itself. So the printed number is when VOX stopped
+*sending*, and `out_latency_s` is logged beside it as the tail that can still be heard.
+
+Barge-in needs a turn after the one being interrupted, so `--turns 2` or more switches it on. The
+last turn of a run is played blocking, which keeps `make demo`'s default single turn exactly as
+VOX-002 and VOX-003 measured it. One consequence worth knowing when reading the logs: a watched
+turn's record closes only once the *next* utterance has been endpointed, because one listener spans
+both — so its `ts` and its printed latency line land after the user has spoken again.
 
 ---
 
@@ -145,6 +284,9 @@ src/
   arms.py          — the one interface: stt(audio, id) / llm(msgs, id) / tts(text, id); resolves,
                      logs and dispatches. Every model call goes through here.
   telemetry.py     — shared cost/latency logger; arms.py is its only caller for model calls
+  cooldown.py      — which arms are parked after a 429, and until when
+  errors.py        — where a provider response becomes a named failure; `is_transient` is the
+                     one place the fallback rule is written
   vad.py           — endpointing via snakers4/silero-vad (local)
   stt.py           — STT backends: openai-audio (Groq), transformers-whisper, faster-whisper
   nlu.py           — the openai-chat backend + the message assembly arms.llm() takes;
@@ -185,12 +327,18 @@ lives only in `src/config.py`.
 | STT | `openai/whisper-large-v3-turbo` | Groq free tier | `openai-audio` | `turbo` **(default)** |
 | STT | `openai/whisper-large-v3` | Groq free tier | `openai-audio` | `large-v3` |
 | STT | `openai/whisper-base` | local | `transformers-whisper` | `whisper-base` |
-| STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` |
+| STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` **(fallback)** |
 | LLM | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-8b` **(default)** |
 | LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` |
 | LLM | `meta-llama/Llama-3.1-70B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-70b` |
+| LLM | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` | local, via ollama | `ollama-chat` | `llama-3.2-3b` **(fallback)** |
 | TTS | `hexgrad/Kokoro-82M` | local | `kokoro` | `kokoro` **(default)** |
-| TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` |
+| TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` **(fallback)** |
+
+`ollama` is a provider name of its own rather than `local` because the arm runs on this machine and
+still speaks HTTP, to a daemon on `localhost:11434`. `Arm.local` is the attribute that answers "are
+the weights here", and it is what `PIPELINE` and `FALLBACKS` are checked against — `provider` alone
+stopped being sufficient the moment a local arm needed an `api_base`.
 
 The defaults are the arms VOX-002 and VOX-003 measured, so an unflagged run still reproduces those
 numbers. Selection:

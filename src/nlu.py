@@ -21,6 +21,12 @@ from src.config import PROMPTS_DIR
 MAX_TOKENS = 120
 TEMPERATURE = 0.3
 
+# How long ollama keeps the fallback model resident after a call. Its default is 5 minutes, which
+# is shorter than a demo and would let the model page out between the warm-up and the rate limit
+# that needs it — putting the load back inside a turn, which is the thing load_ollama exists to
+# prevent. -1 keeps it until the daemon is told otherwise.
+OLLAMA_KEEP_ALIVE = -1
+
 # Prompt library (VOX-018). One versioned file per intent stage — none inlined in code.
 # Keys match the intent labels in ENTITY_SPEC.md; "reply" is the Phase-0 fallback.
 PROMPT_FILES = {
@@ -64,8 +70,8 @@ def messages(transcript, stage=None):
     ]
 
 
-def openai_chat(arm, msgs, rec, timeout=60):
-    """OpenAI-compatible /chat/completions. Serves every LLM arm; NIM and Groq both speak it.
+def openai_chat(arm, msgs, rec, timeout=None):
+    """OpenAI-compatible /chat/completions. Serves every LLM arm — NIM, Groq and ollama all speak it.
 
     `arm.extra["request"]` adds the fields an arm cannot be called without — `reasoning_effort` for
     gpt-oss. It is merged after the shared parameters and deliberately cannot override them, so no
@@ -78,10 +84,9 @@ def openai_chat(arm, msgs, rec, timeout=60):
 
     r = httpx.post(
         f"{arm.api_base}/chat/completions",
-        headers={"Authorization": f"Bearer {arm.key()}",
-                 "Content-Type": "application/json"},
+        headers=arm.auth_headers({"Content-Type": "application/json"}),
         json=body,
-        timeout=timeout,
+        timeout=arm.timeout_s if timeout is None else timeout,
     )
     errors.check(r, arm, rec)
     payload = r.json()
@@ -105,11 +110,57 @@ def openai_chat(arm, msgs, rec, timeout=60):
     return text
 
 
-BACKENDS = {"openai-chat": openai_chat}
-LOADERS = {}          # both arms are hosted; there is nothing to warm
+def load_ollama(arm):
+    """Get the local model resident in memory before a turn depends on it. Called by arms.warm().
+
+    Two steps, and both matter for a different reason.
+
+    Checking it is *pulled* is deliberately not a pull: `ollama pull` fetches ~2 GB, and doing that
+    inside a fallback — which by definition happens when something has already gone wrong — turns a
+    rate-limited turn into a several-minute stall with no explanation. Better to say now that the
+    fallback is not ready, while the remote arm is still working.
+
+    Loading it is the other half, and the reason this is a LOADER rather than a validator. A cold
+    ollama call pages the whole model in first: measured at over 10 s here, which is longer than the
+    entire remote budget the fallback exists to escape. An empty-prompt /api/generate is ollama's
+    own way to ask for that without generating anything, so the load lands in startup where every
+    other local weight already does, instead of inside t_llm.
+    """
+    root = arm.api_base.rsplit("/v1", 1)[0]
+    try:
+        r = httpx.get(f"{root}/api/tags", timeout=5)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(
+            f"no ollama daemon at {root} ({type(e).__name__}), so {arm.repo_id} cannot serve as "
+            f"the local LLM fallback. Start ollama, or accept that a rate limit ends the turn."
+        ) from e
+
+    pulled = {m.get("name", "") for m in (r.json().get("models") or [])}
+    if arm.provider_model not in pulled:
+        raise RuntimeError(
+            f"{arm.provider_model} is not pulled, so {arm.repo_id} cannot serve as the local LLM "
+            f"fallback. Run:\n    ollama pull {arm.provider_model}"
+        )
+
+    load = httpx.post(f"{root}/api/generate",
+                      json={"model": arm.provider_model, "keep_alive": OLLAMA_KEEP_ALIVE},
+                      timeout=arm.timeout_s)
+    load.raise_for_status()
+    return arm
 
 
-def reply(transcript, turn_id, model_id=None, stage=None):
+# `ollama-chat` is the same adapter on the same wire protocol — the separate name exists because
+# LOADERS is keyed by backend, and "is the model pulled?" is a question only the ollama arm can be
+# asked. Pointing both keys at one function keeps that a registry fact rather than a second adapter.
+BACKENDS = {"openai-chat": openai_chat, "ollama-chat": openai_chat}
+
+# The two hosted arms have nothing to warm. The ollama arm is checked rather than loaded: the
+# daemon owns the weights, and this process only needs to know they are there.
+LOADERS = {"ollama-chat": load_ollama}
+
+
+def reply(transcript, turn_id, model_id=None, stage=None, on_fallback=None, fallback=True):
     """-> one short reply suitable for reading aloud, from the named arm or the default.
 
     Args:
@@ -118,9 +169,12 @@ def reply(transcript, turn_id, model_id=None, stage=None):
         model_id: HF repo id of the LLM arm, or None for the default.
         stage: prompt stage (greet, clarify, confirm, capture, escalate, refuse).
                None uses the generic reply prompt.
+        on_fallback: optional callback when the remote arm falls back to local.
+        fallback: set False to disable fallback (e.g. arm comparison scripts).
     """
     from src import arms                      # imported here: arms imports this module for BACKENDS
     prompt_key = stage if stage in PROMPT_FILES else _DEFAULT_STAGE
     return arms.llm(messages(transcript, stage), model_id, turn_id=turn_id,
+                    on_fallback=on_fallback, fallback=fallback,
                     prompt_file=PROMPT_FILES[prompt_key].name,
                     transcript_chars=len(transcript))
