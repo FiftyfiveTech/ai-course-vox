@@ -2,7 +2,7 @@
 
 **Track:** AI Engineering Course, Week 3
 **Status:** Draft — awaiting sign-off from Vimal (Evaluator)
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-20
 
 ---
 
@@ -111,6 +111,13 @@ Two logs, joined by `turn_id`, because they answer different questions:
 endpoint decision — through to the moment the output device pulls its first block. The user has
 been waiting since they stopped talking, so the VAD hangover is inside the number, and the
 callback stamp is the first audio rather than the moment playback was queued.
+
+**A `Capture` therefore owns a clock, and reusing one across turns breaks this field.** `speech_end_t`
+is a `perf_counter` stamp taken when that capture's speech ended, so a second turn driven from the
+same capture is measured from the first turn's origin and inflates by everything in between. VOX-013
+hit this: three identical turns read 6.5 s, 39.4 s and 63.6 s. Anything replaying a fixture must
+endpoint per turn — `src/harness.py` documents it, `scripts/compare_arms.py` endpoints per turn and
+asserts the segment came out identical, and `tests/unit/test_compare.py` pins the mechanism.
 
 ---
 
@@ -295,7 +302,13 @@ src/
   loop.py          — one chained turn; `make demo`
   confirm.py       — confirmation flow logic (VOX-020, not yet written)
   actions.py       — tool/API calls (read and write) (not yet written)
-  tts.py           — TTS backends: kokoro, speecht5
+  tts.py           — TTS backends: kokoro, speecht5, piper
+  harness.py       — one chained turn driven from a recording, shared by
+                     scripts/turn_from_fixture.py and scripts/compare_arms.py
+  sources.py       — PDF corpus -> text chunks with (doc_id, page) provenance (VOX-029);
+                     retrieval over those chunks lands in VOX-030
+
+sources/           — the PDF corpus. Gitignored: internal HR policies (see below)
 
 prompts/
   reply_v1.md      — spoken-reply prompt (versioned; never inline)
@@ -334,6 +347,7 @@ lives only in `src/config.py`.
 | LLM | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` | local, via ollama | `ollama-chat` | `llama-3.2-3b` **(fallback)** |
 | TTS | `hexgrad/Kokoro-82M` | local | `kokoro` | `kokoro` **(default)** |
 | TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` **(fallback)** |
+| TTS | `rhasspy/piper-voices` | local | `piper` | `piper` |
 
 `ollama` is a provider name of its own rather than `local` because the arm runs on this machine and
 still speaks HTTP, to a daemon on `localhost:11434`. `Arm.local` is the attribute that answers "are
@@ -349,6 +363,7 @@ uv run python scripts/check_arms.py --list   # the table, no calls
 uv run python -m src.loop --stt openai/whisper-base --tts microsoft/speecht5_tts
 uv run python scripts/turn_from_fixture.py --llm gpt-oss     # alias, repo id, or repo/id@provider
 VOX_STT_MODEL=faster-base make turn                          # env sets the default; the flag wins
+make compare                                 # two whole architectures, five stages each (VOX-013)
 ```
 
 `stt_model` / `llm_model` / `tts_model` on every `runs/turns.jsonl` line name the arms that produced
@@ -405,6 +420,134 @@ free tier now serves is a reasoning model.** At default effort `openai/gpt-oss-1
 arm answering at all. `src/nlu.py` raises a named error on an empty reply rather than handing
 silence to TTS.
 
+
+### Architecture comparison, n=3, 2026-08-20 (VOX-013)
+
+`make compare` runs two *whole* pipelines as real turns and reads the five-field split off
+`runs/turns.jsonl`. Different question from `make arms`: that times stages, this times architectures,
+and the gaps between the calls belong to no call. The arm sets are `config.ARCHITECTURES`.
+
+| | arm `fast` | arm `quality` |
+|---|---|---|
+| stt | `Systran/faster-whisper-base` @ local | `openai/whisper-large-v3` @ groq |
+| llm | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` @ ollama | `meta-llama/Llama-3.1-70B-Instruct` @ nvidia-nim |
+| tts | `rhasspy/piper-voices` @ local | `hexgrad/Kokoro-82M` @ local |
+| credentials | none | `GROQ_API_KEY` + `NVIDIA_API_KEY` |
+
+`make compare`, 3 turns per arm, interleaved A/B/A/B, on `tests/fixtures/hello_testing_voice.mp3`.
+Fallback **off** throughout, so a refused stage would read FAILED rather than borrowing the local
+arm's latency. Weights warmed before anything was timed. Both arms played to the speaker, which is
+what makes the fifth stage measurable at all.
+
+| stage (ms) | `fast` min | med | max | `quality` min | med | max |
+|---|---|---|---|---|---|---|
+| `t_vad` | 4 | 4 | 6 | 4 | 4 | 6 |
+| `t_stt` | 1047 | 1062 | 1116 | 299 | 321 | 324 |
+| `t_llm` | 4267 | 4321 | 4436 | 1726 | 3794 | 15428 |
+| `t_tts` | 552 | 580 | 616 | 4619 | 4932 | 6290 |
+| `time_to_first_audio` | 6202 | **6695** | 6717 | 8914 | **9291** | 21269 |
+| `stage_sum` | 5886 | 5987 | 6135 | 8343 | 8718 | 20685 |
+
+| | `fast` | `quality` |
+|---|---|---|
+| transcript | `'So this is testing.'` | `'Hello. So this is testing.'` |
+| reply | 65-77 chars | 45-72 chars |
+| speech produced | 3.74-4.26 s at 22.05 kHz | 3.12-4.28 s at 24 kHz |
+| tts per reply char | **7.53-9.47 ms** | **87.36-102.65 ms** |
+| turns completed | 3 of 3 | 3 of 3 |
+
+Six findings. n=3, so treat every timing as a range and the transcripts as results:
+
+1. **The all-local arm wins on predictability, not by a landslide on speed.** Median
+   `time_to_first_audio` 6.7 s against 9.3 s, so `fast` is ~28% quicker at the median. The real gap is
+   the spread: `fast` lands in a 515 ms band across three turns, `quality` in a **12.4 s** band. For a
+   voice agent the second number is the one that decides whether a demo is watchable.
+2. **piper is 9-13x cheaper per character than Kokoro, and that is the single biggest lever here.**
+   7.53-9.47 ms/char against 87.36-102.65. It turns TTS from the largest stage in the turn (VOX-003's
+   finding, still true for `quality` at 4.6-6.3 s) into the smallest model call in the pipeline
+   (0.55-0.62 s). **This partly supersedes the plan above of streaming Kokoro's first chunk** —
+   switching arms gets most of that win for a config change instead of a rework. Whether piper's voice
+   is acceptable is a quality question this table does not answer.
+3. **The local LLM spends what the local STT and TTS save.** `t_llm` 4.27-4.44 s on the 3B via ollama
+   against a *median* 3.79 s for the 70B on NIM. The small local model is slower than the large hosted
+   one half the time — it is simply never surprising, which is finding 1 again.
+4. **The first word is still lost, now confirmed end to end.** `faster-whisper-base` returned
+   `'So this is testing.'` on all three turns; `whisper-large-v3` returned `'Hello. So this is
+   testing.'` on all three. This is the `quality` arm's only non-latency advantage in the table and it
+   is the reason `PIPELINE` puts STT remote. WER on `evals/dev` is what should settle it, not one clip.
+5. **The `quality` arm is not deployable at the shipped timeout.** This run gave hosted arms 120 s.
+   One of three 70B calls took **15.4 s**, and `REMOTE_TIMEOUT_S` is **10 s** — so on the shipped
+   configuration that turn times out and falls back, meaning 1 in 3 turns would not have run the arm
+   the table credits. `--remote-timeout` exists so the arm can be measured at all; it is not a
+   proposal to widen the budget.
+6. **Neither arm is near the 2 s target.** The fastest single turn of six was 6202 ms. The budget
+   table above stands as unmet, and `t_vad` here is fixture-collapsed — add ~1.1 s for a live mic.
+
+Reading caveats, both of which are in the script rather than left to the reader:
+
+- **`t_tts` is not held equal across arms**, because the two LLMs write different-length replies. That
+  is inherent to comparing architectures end to end rather than stages, which is why the per-char
+  number is printed alongside it. `make arms` is where TTS text is held constant.
+- **Load is excluded from every cell**: 3.5 s faster-whisper, 4.8 s ollama, 3.7 s piper, 10.2 s
+  Kokoro, all warmed before timing. A cold Kokoro inside `t_tts` would have doubled that row.
+
+---
+
+## Document source folder (POC, VOX-029)
+
+A folder of PDFs in, one JSON lines file of chunks out — `make index`, no network, no model call,
+no key. `pypdf` parses; the tokenizer only counts. This is the front half of the PDF-question POC
+(VOX-029 -> 030 -> 031 -> 032 -> 033); retrieval and the grounded answer come next.
+
+```
+sources/*.pdf  ──pypdf──>  text per page  ──300-token window, 50 overlap──>  runs/chunks.jsonl
+                                                {doc_id, page, chunk_idx, text}
+```
+
+**The corpus is gitignored, and so is the chunk file.** These are internal FiftyFive HR policies.
+The PDFs and the text extracted from them are the same disclosure, so neither belongs in a repo
+someone else clones. A clean clone therefore has nothing to index until the corpus is put in
+`sources/`; `make index` says so rather than producing an empty index.
+
+**Chunks never span a page**, so `(doc_id, page)` is exact rather than approximate — which is the
+point, because VOX-031 has to *say* where an answer came from. The cost is that a sentence
+continuing over a page break is split, and the report prints how many pages were long enough to
+split at all so the size of that trade is visible.
+
+**`doc_id` is the filename stem**, and the filenames are the documents' own titles
+(`leave-policy.pdf`), not the export hashes they arrived as. `scripts/rename_sources.py` derives
+the name from the first title-like line in each PDF and is re-runnable after a fresh export; two
+titles are overridden by hand there. Spoken provenance is the reason: "leave-policy page 4" is an
+answer, "8f0a7775e8b149cf8de3528d379c9a1e page 4" is a hash.
+
+**Tokens are counted with the tokenizer of the model that will read the chunks**, so "300 tokens"
+means what VOX-031's prompt budget means by it. `meta-llama/Llama-3.1-8B-Instruct` is gated and
+401s without a token, so `config.TOKENIZER_REPO` pins a mirror of the same Llama-3.1 tokenizer
+files (`NousResearch/Meta-Llama-3.1-8B-Instruct`, 128k vocab). It is loaded `local_files_only`, so
+an index build either uses the local cache or fails saying `make tokenizer` — that is what makes
+"no network calls" true of the *first* build and not only of the second.
+
+### Measured, `make index`, 2026-08-20
+
+| | |
+|---|---|
+| files | 15 |
+| pages | 184 — 163 with text, **21 with none** |
+| chunks | 215 |
+| tokens | 40,750 (250 per page with text) |
+| pages long enough to split | 52 of 163 |
+
+The 21 empty pages are named individually in the output. They are cover and end pages on this
+corpus — but an image-only scan looks identical at this stage and would make the POC answer
+nothing at query time, so they are reported at load rather than discovered three tickets later.
+**This corpus is not scanned:** every one of the 15 PDFs yields real text, which settles the
+OCR STOP-and-ask in `notes/build-log/VOX/poc-pdf-query-tickets.md`.
+
+Two facts checked rather than assumed, because both are claims the chunker makes about its own
+output: all 215 chunks are verbatim substrings of the page they came from (the decode round-trip
+is lossless), and the shared text between consecutive chunks on a page re-tokenizes to 49-52
+tokens, mean 50, never 0.
+
 ---
 
 ## Open questions (for sign-off session)
@@ -415,6 +558,9 @@ silence to TTS.
    (404 on Groq's catalogue; no answer from NIM inside 120 s, twice), and 3.1-70B on NIM answered in
    39.3 s and 8.1 s against the 8B's 1.5 s and 0.4 s. It stays registered as `llama-70b` so VOX-013
    can measure quality against that cost, but it is not a candidate default. See the table above.
+   **VOX-013 has now measured it end to end and it is still not a candidate:** 1.7 s / 3.8 s / 15.4 s
+   across three turns, and the 15.4 s one exceeds `REMOTE_TIMEOUT_S` (10 s), so a third of turns would
+   fall back on the shipped configuration. `Llama-3.1-8B` stays the default.
 2. ~~TTS: local `espnet` or NIM?~~ **Settled by the VOX-002 ticket:** `hexgrad/Kokoro-82M`,
    local. (This doc originally proposed `espnet/kan-bayashi_ljspeech_vits`; the ticket names
    Kokoro, so the ticket wins.)

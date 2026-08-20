@@ -3,9 +3,8 @@
     uv run python scripts/turn_from_fixture.py tests/fixtures/hello_testing_voice.mp3
 
 Same stages, same telemetry, one line appended to runs/turns.jsonl — the only difference from
-`make demo` is where the frames come from. That seam is `Endpointer`, which takes one 32 ms frame
-and knows nothing about audio devices, so `listen()` stays the only code that opens a mic and
-`make demo` stays live-mic only.
+`make demo` is where the frames come from. The turn itself is `src/harness.fixture_turn`, shared
+with `scripts/compare_arms.py` so the comparison cannot drift from the turn this script measures.
 
 Read `t_vad` and `time_to_first_audio` from a run of this script with care, and never as a stand-in
 for the live number. Frames arrive here as fast as the CPU can push them, so the VAD_SILENCE_MS
@@ -18,26 +17,12 @@ import argparse
 import sys
 from pathlib import Path
 
-import soundfile as sf
-import torch
-import torchaudio
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import audio as audio_out                                          # noqa: E402
-from src import arms, nlu, vad                                              # noqa: E402
-from src.config import SAMPLE_RATE                                          # noqa: E402
-from src.loop import report                                                 # noqa: E402
-from src.telemetry import TURNS_LOG, new_turn_id, turn_timer                # noqa: E402
-
-
-def load_16k_mono(path):
-    """-> float32 mono at SAMPLE_RATE, which is what silero and whisper both want."""
-    data, sr = sf.read(path, dtype="float32", always_2d=True)
-    mono = torch.from_numpy(data.mean(axis=1))
-    if sr != SAMPLE_RATE:
-        mono = torchaudio.functional.resample(mono, sr, SAMPLE_RATE)
-    return mono.numpy()
+from src import arms, harness, vad                                         # noqa: E402
+from src.config import SAMPLE_RATE                                        # noqa: E402
+from src.loop import report                                               # noqa: E402
+from src.telemetry import TURNS_LOG                                       # noqa: E402
 
 
 def main():
@@ -60,45 +45,18 @@ def main():
     chosen = arms.select(args)
     print(arms.describe(chosen))
 
-    clip = load_16k_mono(args.recording)
-    turn_id = new_turn_id()
-    print(f"\n--- turn {turn_id} · {args.recording} ({len(clip) / SAMPLE_RATE:.2f}s) ---")
+    clip = harness.load_16k_mono(args.recording)
+    print(f"\n--- turn · {args.recording} ({len(clip) / SAMPLE_RATE:.2f}s) ---")
 
-    with turn_timer(turn_id, source=str(args.recording)) as turn:
-        turn.arms(**chosen)
-        cap, state = vad.endpoint_frames(vad.frames_from(clip))
-        if cap is None:
-            sys.exit(f"endpointer found no turn in {args.recording} (state={state})")
-        turn.vad(cap)
-        print(f"endpointed: {len(cap) / SAMPLE_RATE:.2f}s ({cap.spoken_s:.2f}s speech), "
-              f"state={state}")
+    try:
+        run = harness.fixture_turn(chosen, clip, str(args.recording), play=not args.silent,
+                                   echo=print)
+    except (harness.NoSpeech, harness.EmptyTranscript) as e:
+        sys.exit(str(e))
 
-        with turn.stage("stt"):
-            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id,
-                                  on_fallback=turn.fallback)
-        print(f"you said : {transcript!r}")
-        if not transcript:
-            sys.exit("empty transcript from STT — not calling the LLM.")
-
-        with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
-                               on_fallback=turn.fallback)
-        print(f"vox says : {answer!r}")
-
-        with turn.stage("tts"):
-            speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id,
-                              on_fallback=turn.fallback)
-
-        if args.silent:
-            print("(--silent: not playing, time_to_first_audio will be null)")
-        else:
-            print("speaking…", flush=True)
-            audio_out.play(speech.audio, sample_rate=speech.sample_rate,
-                           on_first_audio=turn.first_audio)
-
-    print("\n" + report(turn.written))
+    print(f"\nturn {run.turn_id}: " + report(run.record))
     print(f"turn line appended to {TURNS_LOG}")
-    return 0 if turn.written["ok"] else 1
+    return 0 if run.record["ok"] else 1
 
 
 if __name__ == "__main__":

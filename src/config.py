@@ -156,6 +156,18 @@ TTS_ARMS = (
         sample_rate=16_000, vocoder="microsoft/speecht5_hifigan",
         xvector_repo="Matthijs/cmu-arctic-xvectors", xvector_zip="spkrec-xvect.zip",
         xvector_file="spkrec-xvect/cmu_us_slt_arctic-wav-arctic_a0508.npy"),
+    # The fast leg of VOX-013's TTS contrast, and the only arm here that is actually faster than
+    # Kokoro — speecht5 is slower, so a "fast arm" built on it would show no contrast at all.
+    #
+    # One HF repo holds every piper voice as an .onnx / .onnx.json pair, so the repo id alone does
+    # not say what will speak: the voice files are pinned here for the same reason the SpeechT5
+    # speaker embedding above is. `sample_rate` is asserted against the .onnx.json at load, so this
+    # number cannot drift away from the weights and silently pitch-shift playback.
+    Arm(repo_id="rhasspy/piper-voices", provider="local",
+        provider_model="rhasspy/piper-voices", backend="piper", alias="piper",
+        sample_rate=22_050,
+        onnx="en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+        onnx_config="en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"),
 )
 
 ARMS = {"stt": STT_ARMS, "llm": LLM_ARMS, "tts": TTS_ARMS}
@@ -179,6 +191,23 @@ PIPELINE = {"vad": "local", "stt": "remote", "llm": "remote", "tts": "local"}
 # a *local* arm on the same stage; tests/unit/test_fallback.py asserts exactly that, because a
 # fallback that is itself remote would fail for the same reason the primary just did.
 FALLBACKS = {"stt": "faster-base", "llm": "llama-3.2-3b", "tts": "speecht5"}
+
+# --- named architectures (VOX-013) -----------------------------------------------------------
+# Two *complete* pipelines, so `make compare` measures architectures rather than stages. Named by
+# alias, the same way the CLI names an arm, so re-pinning a leg is a table edit here and not a code
+# change in the script — the rule the arm tables above already follow.
+#
+# The contrast is all-local against all-hosted, which is the widest one the registry holds and the
+# one PIPELINE's placement decisions are actually about. `fast` also needs no credential and no
+# quota, so the comparison still produces a column when a free tier refuses.
+#
+# Every alias here must name a registered arm on that stage, and the two must differ at all three
+# stages; tests/unit/test_compare.py asserts both. A shared leg would make "comparison" a claim
+# about one variable while the table shows three.
+ARCHITECTURES = {
+    "fast":    {"stt": "faster-base", "llm": "llama-3.2-3b", "tts": "piper"},
+    "quality": {"stt": "large-v3",    "llm": "llama-70b",    "tts": "kokoro"},
+}
 
 # How long a rate-limited arm stays out of rotation when the provider sent no Retry-After. Long
 # enough that a free tier is not poked once per turn, short enough that one 429 does not exile the
@@ -285,6 +314,30 @@ BARGE_MIN_SPEECH_MS = 200
 # fixes it, because speaker bleed is real speech as far as a VAD is concerned. The demo machine runs
 # on headphones — see notes/ and ARCHITECTURE.md.
 BARGE_SPEECH_THRESHOLD = 0.7
+
+# --- source documents (VOX-029) ---------------------------------------------------------------
+# The PDF corpus the POC answers from, and where the extracted chunks land. Both are gitignored:
+# these are internal HR policies, so the documents and the text pulled out of them are the same
+# disclosure either way. `make index` rebuilds the chunk file, so nothing here is precious.
+SOURCES_DIR = Path(os.environ.get("VOX_SOURCES_DIR", REPO_ROOT / "sources"))
+CHUNKS_FILE = Path(os.environ.get("VOX_CHUNKS_FILE", RUNS_DIR / "chunks.jsonl"))
+
+# Chunk geometry, in *model* tokens rather than words — see TOKENIZER_REPO for why that is worth
+# a tokenizer. 300/50 is the ticket's number, kept as config because VOX-030's retrieval quality
+# is the thing that decides whether it was right, and that measurement has not happened yet.
+CHUNK_TOKENS = int(os.environ.get("VOX_CHUNK_TOKENS", "300"))
+CHUNK_OVERLAP_TOKENS = int(os.environ.get("VOX_CHUNK_OVERLAP_TOKENS", "50"))
+
+# Counting tokens with the tokenizer of the model that will read the chunks, so "300 tokens" means
+# what VOX-031's prompt budget means by it. Splitting on whitespace would have needed no download
+# and would also have made the number a different unit from the one that matters.
+#
+# The default LLM arm is meta-llama/Llama-3.1-8B-Instruct, whose repo is gated: from_pretrained
+# 401s without an HF token, so a clean clone could not build an index. This repo id is a mirror of
+# those same Llama-3.1 tokenizer files (128k vocab, byte-level BPE, verified against
+# unsloth/Meta-Llama-3.1-8B-Instruct on the same string). It is named as an HF repo id like every
+# other model here; it is a tokenizer, so it is never called and costs nothing.
+TOKENIZER_REPO = os.environ.get("VOX_TOKENIZER_REPO", "NousResearch/Meta-Llama-3.1-8B-Instruct")
 
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "

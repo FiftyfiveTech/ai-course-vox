@@ -24,6 +24,7 @@ other person as a collaborator with push access.
 | `evals/dev/` | **Builder** tunes here. 15 cases. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
+| `sources/` | The PDF corpus the POC answers from. **Gitignored** — internal documents, see below. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
 
 ## Deliberately missing
@@ -82,6 +83,24 @@ arm for its `Retry-After` window so the next turn does not pay another doomed ro
 The LLM fallback needs ollama and one ~2 GB pull; `make setup` does it, and warns rather than fails
 if ollama is absent. Full rules, trigger table and measured numbers: the fallback section of
 `ARCHITECTURE.md`.
+
+## Answering from a folder of PDFs (POC)
+
+```bash
+make tokenizer   # once — caches the tokenizer the chunker counts with (~9 MB)
+make index       # sources/*.pdf -> runs/chunks.jsonl, and prints the counts
+```
+
+`make index` extracts every PDF page by page and cuts it into 300-token chunks with 50 tokens of
+overlap, each carrying the `doc_id` and `page` it came from so a spoken answer can say where it
+came from. No network, no model call, no key. Pages that yield **no** text are printed by name:
+on a scanned PDF that is the whole corpus, and it has to be visible at load rather than as an
+empty answer later.
+
+`sources/` and the chunk file are gitignored — the corpus is internal company documentation, and
+the extracted text is the same disclosure as the PDFs. A clean clone has nothing to index until
+someone puts documents there. Retrieval over the chunks is VOX-030; the grounded answer is
+VOX-031. Details and the measured counts: the source-folder section of `ARCHITECTURE.md`.
 
 ## Rules that live in this repo
 
