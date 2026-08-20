@@ -1,0 +1,37 @@
+# VOX endpointing and barge-in tuning (VOX-012).
+#
+# These values were provisional magic numbers in src/config.py. They now live here so
+# a value change is a one-line edit and its effect can be measured without touching code.
+#
+# Tune on evals/dev/ only. The held-out set stays sealed until gate_phase1b.py runs.
+# After changing a value, run:
+#   .venv/bin/python scripts/tune_vad.py
+# to see the measured effect on the 45 dev utterances.
+
+endpointing:
+  # silero speech probability above which a frame counts as speech (0.0–1.0).
+  # Lower -> more sensitive, more false starts. Higher -> misses soft speech.
+  speech_threshold: 0.5
+
+  # Utterances shorter than this are treated as noise (coughs, clicks), not turns.
+  min_speech_ms: 250
+
+  # Hard stop: a mic left open cannot hang the loop past this.
+  max_utterance_ms: 15000
+
+  # How long silence must last after the last speech frame before the turn is endpointed.
+  # Measured on hello_testing_voice.mp3 — 1100 ms is the smallest value that clears a
+  # natural mid-sentence pause. Costs ~400 ms of trailing silence per turn (lands in
+  # time_to_first_audio). Tune this value and rerun scripts/tune_vad.py to see the trade-off.
+  silence_ms: 1100
+
+barge_in:
+  # How much continuous speech must accumulate before the reply is stopped.
+  # Too low -> a cough cuts every reply. Too high -> stop latency climbs.
+  min_speech_ms: 200
+
+  # Speech probability threshold for the barge-in listener.
+  # Higher than endpointing.speech_threshold: no acoustic echo cancellation means
+  # silero hears Kokoro on open speakers. A stricter threshold reduces self-interrupts;
+  # it does not fix speaker bleed. Run on headphones for reliable barge-in.
+  speech_threshold: 0.7

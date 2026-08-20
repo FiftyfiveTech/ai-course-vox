@@ -12,11 +12,16 @@ caller.
 import os
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = REPO_ROOT / "runs"
 PROMPTS_DIR = REPO_ROOT / "prompts"
+
+# VOX-012: tuning values live in config.yaml, not in code.
+_CFG_FILE = REPO_ROOT / "config.yaml"
+_cfg = yaml.safe_load(_CFG_FILE.read_text()) if _CFG_FILE.exists() else {}
 
 # Real values live outside the repo; .env is gitignored and holds names the shell can export.
 load_dotenv(REPO_ROOT / ".env")
@@ -276,44 +281,16 @@ TTS_VOICE = os.environ.get("VOX_TTS_VOICE", "af_heart")
 # language. Phase 0 is English only; the multilingual leg is VOX-022 and will set this per case.
 STT_LANGUAGE = os.environ.get("VOX_STT_LANGUAGE", "en")
 
-# --- endpointing (VOX-012 lifts these into a config file) ----------------------------------
-VAD_SPEECH_THRESHOLD = 0.5     # silero speech probability above which a frame counts as speech
-VAD_MIN_SPEECH_MS = 250        # shorter than this is a cough, not a turn
-VAD_MAX_UTTERANCE_MS = 15_000  # hard stop so a stuck mic cannot hang the loop
+# --- endpointing + barge-in (VOX-012: values now live in config.yaml) ----------------------
+_ep = _cfg.get("endpointing", {})
+_bi = _cfg.get("barge_in", {})
 
-# PROVISIONAL — set from a single recording, not from a dev set. VOX-012 must re-tune this on
-# VOX-004's 45 utterances and print the number it chose.
-#
-# Measured on hello-testing-voice.mp3 ("Hello. So this is testing.", one 1.05 s mid-sentence
-# pause), sweeping this value and transcribing what the endpointer produced:
-#     700 ms -> 1.02 s segment -> "Bye."                       (endpointed mid-sentence)
-#     900 ms -> 1.25 s segment -> "Bye."                       (endpointed mid-sentence)
-#    1100 ms -> 3.30 s segment -> "Hello. So this is testing."  (correct)
-#    1300 ms -> 3.30 s segment -> "Hello. So this is testing."  (correct, slower)
-# 1100 is the smallest value tested that clears a natural pause. It costs ~400 ms of extra
-# trailing silence on every turn, which lands in time_to_first_audio when VOX-003 measures it.
-VAD_SILENCE_MS = 1_100
-
-# --- barge-in (VOX-011; VOX-012 lifts these into the same config file) -----------------------
-# The endpointer decides where a turn *ends*. These two decide when a reply gets *cut*, which is a
-# different trade: endpointing may take a second to be sure, and barge-in may not.
-#
-# PROVISIONAL — neither is measured on VOX-004's 45 utterances yet, and VOX-012 must re-tune both
-# and print the numbers it chose.
-#
-# How much speech has to accumulate before the reply is stopped. Cutting on the very first speech
-# frame would give the fastest possible stop and would also let a cough, a chair or a door kill
-# every reply. This is that trade, made explicitly: the stop latency printed on the turn record is
-# measured from the *first* speech frame, so whatever is set here is visible in the number rather
-# than hidden inside it.
-BARGE_MIN_SPEECH_MS = 200
-
-# Higher than VAD_SPEECH_THRESHOLD on purpose, and for one reason only: there is no acoustic echo
-# cancellation in this pipeline. On open speakers silero hears Kokoro and the reply interrupts
-# itself. A stricter threshold reduces how often that happens; it does not fix it, and no value here
-# fixes it, because speaker bleed is real speech as far as a VAD is concerned. The demo machine runs
-# on headphones — see notes/ and ARCHITECTURE.md.
-BARGE_SPEECH_THRESHOLD = 0.7
+VAD_SPEECH_THRESHOLD  = _ep.get("speech_threshold",  0.5)
+VAD_MIN_SPEECH_MS     = _ep.get("min_speech_ms",     250)
+VAD_MAX_UTTERANCE_MS  = _ep.get("max_utterance_ms",  15_000)
+VAD_SILENCE_MS        = _ep.get("silence_ms",        1_100)
+BARGE_MIN_SPEECH_MS   = _bi.get("min_speech_ms",     200)
+BARGE_SPEECH_THRESHOLD = _bi.get("speech_threshold", 0.7)
 
 # --- source documents (VOX-029) ---------------------------------------------------------------
 # The PDF corpus the POC answers from, and where the extracted chunks land. Both are gitignored:
