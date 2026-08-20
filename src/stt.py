@@ -27,14 +27,17 @@ def _wav_bytes(segment):
     return buf.getvalue()
 
 
-def openai_audio(arm, segment, rec, timeout=None):
+def openai_audio(arm, segment, rec, timeout=None, prompt=None):
     """OpenAI-compatible /audio/transcriptions — Groq's free tier serves both whisper arms here."""
+    data = {"model": arm.provider_model, "response_format": "json",
+            "temperature": "0", "language": STT_LANGUAGE}
+    if prompt:
+        data["prompt"] = prompt
     r = httpx.post(
         f"{arm.api_base}/audio/transcriptions",
         headers=arm.auth_headers(),
         files={"file": ("turn.wav", _wav_bytes(segment), "audio/wav")},
-        data={"model": arm.provider_model, "response_format": "json",
-              "temperature": "0", "language": STT_LANGUAGE},
+        data=data,
         timeout=arm.timeout_s if timeout is None else timeout,
     )
     errors.check(r, arm, rec)
@@ -51,12 +54,15 @@ def load_transformers_whisper(arm):
     return _loaded[arm.id]
 
 
-def transformers_whisper(arm, segment, rec):
+def transformers_whisper(arm, segment, rec, prompt=None):
     """openai/whisper-base on the CPU through transformers. No network, no key."""
     asr = load_transformers_whisper(arm)
+    gen_kwargs = {"language": STT_LANGUAGE, "task": "transcribe"}
+    if prompt:
+        gen_kwargs["initial_prompt"] = prompt
     out = asr(
         {"raw": np.asarray(segment, dtype=np.float32), "sampling_rate": SAMPLE_RATE},
-        generate_kwargs={"language": STT_LANGUAGE, "task": "transcribe"},
+        generate_kwargs=gen_kwargs,
     )
     text = (out.get("text") or "").strip()
     rec["chars"] = len(text)
@@ -71,11 +77,13 @@ def load_faster_whisper(arm):
     return _loaded[arm.id]
 
 
-def faster_whisper(arm, segment, rec):
+def faster_whisper(arm, segment, rec, prompt=None):
     """The same weights through CTranslate2. `transcribe` is lazy — consuming it does the work."""
     model = load_faster_whisper(arm)
-    segments, info = model.transcribe(np.asarray(segment, dtype=np.float32),
-                                      language=STT_LANGUAGE, beam_size=5)
+    kwargs = {"language": STT_LANGUAGE, "beam_size": 5}
+    if prompt:
+        kwargs["initial_prompt"] = prompt
+    segments, info = model.transcribe(np.asarray(segment, dtype=np.float32), **kwargs)
     text = " ".join(s.text.strip() for s in segments).strip()
     rec["chars"] = len(text)
     rec["language_prob"] = round(info.language_probability, 3)
