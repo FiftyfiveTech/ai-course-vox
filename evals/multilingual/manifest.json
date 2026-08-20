@@ -1,0 +1,37 @@
+[
+  {
+    "id": "ml_001",
+    "language": "fr",
+    "text": "enregistre quatre heures sur le projet VOX aujourd'hui",
+    "english_gloss": "log four hours on VOX project today",
+    "file": "evals/multilingual/ml_001_fr.wav"
+  },
+  {
+    "id": "ml_002",
+    "language": "fr",
+    "text": "reserve une reunion d'une heure avec Priya demain a quinze heures",
+    "english_gloss": "book a one hour meeting with Priya tomorrow at three pm",
+    "file": "evals/multilingual/ml_002_fr.wav"
+  },
+  {
+    "id": "ml_003",
+    "language": "fr",
+    "text": "rappelle a Kiran de soumettre la feuille de temps vendredi a dix-sept heures",
+    "english_gloss": "remind Kiran to submit the timesheet on Friday at five pm",
+    "file": "evals/multilingual/ml_003_fr.wav"
+  },
+  {
+    "id": "ml_004",
+    "language": "fr",
+    "text": "quelles reunions ai-je demain",
+    "english_gloss": "what meetings do I have tomorrow",
+    "file": "evals/multilingual/ml_004_fr.wav"
+  },
+  {
+    "id": "ml_005",
+    "language": "fr",
+    "text": "montre mon planning pour cette semaine",
+    "english_gloss": "show me my schedule for this week",
+    "file": "evals/multilingual/ml_005_fr.wav"
+  }
+]

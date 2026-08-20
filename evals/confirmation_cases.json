@@ -1,0 +1,130 @@
+[
+  {
+    "id": "conf_001",
+    "source": "heldout",
+    "source_utt": "utt_011",
+    "text": "log four hours on the VOX project for today",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "4h",
+      "project": "vox project",
+      "date": "2026-08-18"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Log 4 hours on VOX project for today. Shall I go ahead?",
+    "notes": "Write action: logging hours modifies timesheet data."
+  },
+  {
+    "id": "conf_002",
+    "source": "heldout",
+    "source_utt": "utt_012",
+    "text": "log two and a half hours on the AI course track for yesterday",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "2.5h",
+      "project": "ai course track",
+      "date": "2026-08-17"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Log 2.5 hours on AI course track for yesterday. Shall I go ahead?",
+    "notes": "Write action: logging hours modifies timesheet data."
+  },
+  {
+    "id": "conf_003",
+    "source": "heldout",
+    "source_utt": "utt_013",
+    "text": "add six hours to the infrastructure project for last Friday",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "6h",
+      "project": "infrastructure project",
+      "date": "2026-08-14"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Log 6 hours on infrastructure project for last Friday. Shall I go ahead?",
+    "notes": "Write action: back-dated timesheet entry."
+  },
+  {
+    "id": "conf_004",
+    "source": "heldout",
+    "source_utt": "utt_014",
+    "text": "record three hours on the client onboarding task for this week",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "3h",
+      "project": "client onboarding task",
+      "date": "week of 2026-08-17"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Log 3 hours on client onboarding task for this week. Shall I go ahead?",
+    "notes": "Write action: week-level timesheet entry."
+  },
+  {
+    "id": "conf_005",
+    "source": "heldout",
+    "source_utt": "utt_015",
+    "text": "log one hour on the design sprint for August twentieth",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "1h",
+      "project": "design sprint",
+      "date": "2026-08-20"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Log 1 hour on design sprint for August 20th. Shall I go ahead?",
+    "notes": "Write action: future-dated timesheet entry."
+  },
+  {
+    "id": "conf_006",
+    "source": "heldout",
+    "source_utt": "utt_019",
+    "text": "remind Kiran to submit the timesheet by end of day Friday",
+    "gold": {
+      "intent": "set_reminder",
+      "person": ["kiran"],
+      "time": "17:00",
+      "date": "2026-08-21"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Set a reminder for Kiran to submit timesheet by 5 pm on Friday. Shall I go ahead?",
+    "notes": "Write action: creates a reminder that notifies another person."
+  },
+  {
+    "id": "conf_007",
+    "source": "heldout",
+    "source_utt": "utt_020",
+    "text": "set a weekly reminder for the sprint retrospective every Monday at four p.m.",
+    "gold": {
+      "intent": "set_reminder",
+      "recurrence": "weekly_monday",
+      "time": "16:00"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Set a weekly reminder for sprint retrospective every Monday at 4 pm. Shall I go ahead?",
+    "notes": "Write action: recurring reminder creation."
+  },
+  {
+    "id": "conf_008",
+    "source": "dev",
+    "source_utt": "utt_006",
+    "text": "book a one hour meeting with Priya tomorrow at three p.m.",
+    "gold": {
+      "intent": "book_meeting",
+      "person": ["priya"],
+      "duration": "1h",
+      "date": "2026-08-19",
+      "time": "15:00"
+    },
+    "confirmation_required": true,
+    "miss_is_hard_fail": true,
+    "expected_confirmation_prompt": "Book a 1-hour meeting with Priya tomorrow at 3 pm. Shall I go ahead?",
+    "notes": "Write action: creates a calendar event for another person."
+  }
+]
