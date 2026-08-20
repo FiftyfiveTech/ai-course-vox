@@ -25,7 +25,7 @@ when the remote one fails in a way another arm could survive. See `_call`.
 import sys
 from collections import namedtuple
 
-from src import cooldown, errors, nlu, stt as stt_mod, tts as tts_mod
+from src import cooldown, errors, nlu, stt as stt_mod, tts as tts_mod, vocab_bias
 from src.config import (ARMS, DEFAULT_COOLDOWN_S, FALLBACKS, SAMPLE_RATE, STT_LANGUAGE,
                         resolve)
 from src.telemetry import log_call
@@ -167,10 +167,15 @@ def _dispatch(stage, arm, payload, turn_id, extra, sink=None):
     carries the same number that reached calls.jsonl. One measurement, two readers.
     """
     fn = _backend(stage, arm)
-    with log_call(stage, arm, turn_id, **extra) as rec:
+    # `prompt` is an STT-only kwarg; strip it from the logging dict and pass directly to the backend.
+    backend_kw = {}
+    log_extra = dict(extra)
+    if "prompt" in log_extra:
+        backend_kw["prompt"] = log_extra.pop("prompt")
+    with log_call(stage, arm, turn_id, **log_extra) as rec:
         if sink is not None:
             sink.append(rec)
-        return fn(arm, payload, rec)
+        return fn(arm, payload, rec, **backend_kw)
 
 
 def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra):
@@ -229,8 +234,12 @@ def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, 
 
 def stt(audio, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     """-> transcript text. Raises on a provider error rather than returning a plausible blank."""
+    extra = {"audio_s": round(len(audio) / SAMPLE_RATE, 3), "language": STT_LANGUAGE}
+    bias = vocab_bias.prompt_if_enabled()
+    if bias:
+        extra["prompt"] = bias
     result, _arm = _call("stt", resolve("stt", model_id), audio, turn_id, on_fallback, fallback,
-                         audio_s=round(len(audio) / SAMPLE_RATE, 3), language=STT_LANGUAGE)
+                         **extra)
     return result
 
 
