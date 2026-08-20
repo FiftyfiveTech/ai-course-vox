@@ -5,7 +5,7 @@ help:
 	@echo "make setup   create the venv and install deps (uv), and pull the local fallback model"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
-	@echo "make demo    run the thing end to end (needs a mic)"
+	@echo "make demo    talk to it end to end for VOX_SESSION_MINUTES (default 3; needs a mic)"
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
 	@echo "make ground  one grounded turn from a recording — retrieval in the loop (VOX-032)"
@@ -19,6 +19,10 @@ help:
 	@echo "make coach   serve the interactive learning pages on 127.0.0.1:8765"
 
 OLLAMA_MODEL := hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
+
+# How long `make demo` listens for. Three minutes is enough to ask a few things, interrupt one of
+# them and hear the session end on its own — override it rather than editing the recipe.
+MINUTES ?= 3
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -64,18 +68,29 @@ gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 
-# One chained turn: mic -> silero-vad -> whisper-large-v3-turbo -> retrieval -> Llama-3.1-8B ->
-# Kokoro-82M. The two model stages are remote and fall back to local arms if their free tier
-# refuses; startup warms those fallbacks and warns if one is not ready. Needs a working microphone
-# and speakers. First run downloads the Kokoro weights (~350 MB) and the faster-whisper-base
-# fallback (~150 MB).
+# A conversation, not a turn: mic -> silero-vad -> whisper-large-v3-turbo -> retrieval ->
+# Llama-3.1-8B -> Kokoro-82M, and then round again until the session clock runs out. Every reply
+# plays with the mic still open, so you can talk over it (VOX-011) and a pause is just a pause — the
+# session ends on the clock, on Ctrl-C, or after a minute of silence, and prints what it completed.
+#
+# The two model stages are remote and fall back to local arms if their free tier refuses; startup
+# warms those fallbacks and warns if one is not ready. Needs a working microphone and speakers, and
+# headphones if you want barge-in to work — there is no echo cancellation, so on open speakers
+# silero hears Kokoro and the reply interrupts itself. First run downloads the Kokoro weights
+# (~350 MB) and the faster-whisper-base fallback (~150 MB).
+#
+# How long it runs is config.SESSION_MINUTES, set where every other tunable is set — in the env:
+#
+#   VOX_SESSION_MINUTES=10 make demo     a longer session
+#   VOX_SESSION_MINUTES=0.5 make demo    one or two turns, while iterating on a stage
+#   uv run python -m src.loop            the old single turn, for a clean VOX-003 latency split
 #
 # A question the policy documents cover is answered *from* them, with the doc:page printed under
 # the answer and logged on the turn line (VOX-032) — so `make index` first, or startup says why
 # nothing will be grounded and every turn takes the plain reply path. `--no-kb` forces that older
 # path for a whole run:  uv run python -m src.loop --no-kb
 demo:
-	uv run python -m src.loop
+	uv run python -m src.loop --minutes
 
 # Barge-in (VOX-011). Every turn but the last plays its reply with the mic still open, so talking
 # over VOX stops it mid-sentence, prints the stop latency in ms, and feeds the words that stopped it

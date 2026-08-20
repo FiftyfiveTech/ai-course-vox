@@ -58,12 +58,14 @@ def fake_llm(monkeypatch, reply="Twelve days of casual leave a year.", capture=N
     """Answer every LLM arm with `reply`, recording the msgs it was handed. -> the capture list.
 
     Patches BACKENDS rather than arms.llm: everything between `answer()` and the wire — resolve,
-    log_call, the free-tier check — then still runs for real.
+    log_call, the free-tier check — then still runs for real. `options` are the per-call backend
+    parameters (the temperature), captured because the grounded path sets one and a spoken reply
+    does not.
     """
     seen = capture if capture is not None else []
 
-    def backend(arm, msgs, rec):
-        seen.append({"arm": arm, "msgs": msgs, "rec": rec})
+    def backend(arm, msgs, rec, **options):
+        seen.append({"arm": arm, "msgs": msgs, "rec": rec, "options": options})
         if isinstance(reply, Exception):
             raise reply
         return reply
@@ -294,7 +296,7 @@ def test_a_rate_limited_arm_still_answers_from_the_local_one(monkeypatch, hits):
     serve(monkeypatch, nlu, rate_limited())
     fb = resolve("llm", FALLBACKS["llm"])
     monkeypatch.setitem(nlu.BACKENDS, fb.backend,
-                        lambda arm, msgs, rec: "The leave policy says twelve days.")
+                        lambda arm, msgs, rec, **options: "The leave policy says twelve days.")
 
     got = answer_mod.answer("how much casual leave", "t", hits=hits)
 
@@ -320,3 +322,103 @@ def test_an_empty_reply_is_not_dressed_up_as_an_answer(monkeypatch, hits):
 
     with pytest.raises(RuntimeError, match="empty reply"):
         answer_mod.answer("how much casual leave", "t", hits=hits, fallback=False)
+
+
+# --- the numeric guard --------------------------------------------------------------------------
+# `answer_from_source_v2.md` says "Numbers you may say are the ones written in the excerpts". These
+# assert that sentence is enforced rather than requested — measured, it is not enough to ask. At
+# temperature 0.3 the leave-encashment question returned "you will get 12 rupees" one run in three;
+# at temperature 0 it returned a four-sentence answer built on "you have 20 privileged leave, which
+# is more than the 24 days allowed". Both fluent, both cited, neither number from a document.
+
+@pytest.mark.parametrize("text, expected", [
+    pytest.param("twelve working days", {12}, id="word"),
+    pytest.param("12 working days", {12}, id="digit"),
+    pytest.param("25,000 rupees", {25_000}, id="grouped-digits"),
+    pytest.param("twenty-five thousand rupees", {25_000}, id="word-phrase"),
+    pytest.param("the fourteenth of April", {14}, id="ordinal"),
+    pytest.param("no numbers at all here", set(), id="none"),
+])
+def test_a_reply_states_the_numbers_it_says_however_it_spells_them(text, expected):
+    """The prompt asks for spoken numbers and the documents are written in digits, so a guard that
+    compared surface forms would refuse every correct answer it was ever given."""
+    assert answer_mod.numbers_in(text) == {float(v) for v in expected}
+
+
+def test_a_word_phrase_asserts_its_value_and_not_its_pieces():
+    """The asymmetry the guard rests on. "twenty-five thousand" claims 25000 — a reply held to 5 and
+    20 as well would be refused for saying a number correctly."""
+    assert answer_mod.numbers_in("twenty-five thousand") == {25_000.0}
+    assert {5.0, 20.0} <= answer_mod.numbers_in("twenty-five thousand", parts=True)
+
+
+def test_a_figure_in_no_excerpt_is_reported_as_ungrounded():
+    hits = [Hit("leave-policy", 4, 2, 0.5, "Employees are entitled to twelve days of casual leave.")]
+
+    assert answer_mod.ungrounded_numbers("You get twelve days.", hits) == []
+    assert answer_mod.ungrounded_numbers("You get 4,500 rupees.", hits) == [4500.0]
+
+
+def test_a_number_the_person_supplied_is_not_grounded_by_having_been_asked(monkeypatch, hits):
+    """The shape of the failure, not an innocent restatement: a fabricated calculation is built out
+    of the figures the caller gave, so the excerpts are the only thing that counts as a source."""
+    fake_llm(monkeypatch, reply="Since you have 20 privilege leaves, you will get 16 days.")
+
+    got = answer_mod.answer("I have 20 privilege leaves, what is my encashment", "t", hits=hits)
+
+    assert got.text == REFUSAL and got.grounded is False
+    assert got.sources == [], "a refusal cites nothing"
+
+
+def test_the_suppressed_reply_is_printed_so_the_refusal_can_be_explained(monkeypatch, hits, capsys):
+    """A turn that refuses for this reason must be debuggable. The reply is not spoken and not
+    logged as an answer, but it is on stderr with the figure that killed it."""
+    fake_llm(monkeypatch, reply="You will get 4,500 rupees in leave encashment.")
+
+    answer_mod.answer("what is my encashment", "t", hits=hits)
+
+    err = capsys.readouterr().err
+    assert "UNGROUNDED NUMBER" in err and "4500" in err
+    assert "4,500 rupees" in err, "the suppressed reply itself, so it can be read"
+
+
+def test_an_answer_whose_numbers_are_all_in_the_excerpts_is_untouched(monkeypatch, hits):
+    """The guard must not fire on the ordinary case, which is most of them."""
+    text = " ".join(hits[0].text.split())
+    fake_llm(monkeypatch, reply=text)
+
+    got = answer_mod.answer("how much casual leave", "t", hits=hits)
+
+    assert got.grounded is True and got.text == text
+
+
+# --- sampling ------------------------------------------------------------------------------------
+
+def test_the_grounded_path_asks_for_a_deterministic_answer(monkeypatch, hits):
+    """Reading five policy excerpts is not a task where variety is a feature, and a gate that cannot
+    reproduce its own number is not a gate."""
+    seen = fake_llm(monkeypatch)
+
+    answer_mod.answer("how much casual leave", "t", hits=hits)
+
+    assert seen[0]["options"]["temperature"] == answer_mod.ANSWER_TEMPERATURE == 0.0
+
+
+def test_the_spoken_reply_path_keeps_its_own_temperature(monkeypatch):
+    """Not a global change: a plain reply still samples the way VOX-002 measured it."""
+    seen = fake_llm(monkeypatch, reply="I can help with that.")
+
+    nlu.reply("hello there", "t")
+
+    assert seen[0]["options"] == {}, "no per-call override, so nlu.TEMPERATURE applies"
+
+
+def test_the_temperature_that_was_used_is_on_the_call_record(monkeypatch, hits, calls_log):
+    """Two turns sampled differently are not comparable, and a latency table has no way to know."""
+    import json
+
+    fake_llm(monkeypatch)
+    answer_mod.answer("how much casual leave", "t", hits=hits)
+
+    rec = json.loads(calls_log.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["temperature"] == 0.0

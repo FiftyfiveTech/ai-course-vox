@@ -66,7 +66,9 @@ VOX_STT_MODEL=faster-base make turn          # env sets the default; an explicit
 ```
 
 Currently 4 STT / 4 LLM / 2 TTS arms, hosted (Groq, NVIDIA NIM free tiers) and local. Defaults are
-unchanged from VOX-002, so `make demo` and `make turn` still reproduce those numbers. The measured
+unchanged from VOX-002, so `make turn` still reproduces those numbers — as does a bare
+`uv run python -m src.loop`, which is the single unwatched turn `make demo` used to be before it
+became a timed conversation. The measured
 cost of each arm, and what the local ones get wrong, is in the models section of `ARCHITECTURE.md`.
 `make arms` calls each arm with fallback disabled — it is measuring the arms, so a refusal has to
 show up on the row it belongs to rather than being quietly covered.

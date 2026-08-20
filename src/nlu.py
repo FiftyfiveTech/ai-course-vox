@@ -20,6 +20,9 @@ from src.config import PROMPTS_DIR
 # A spoken turn is short; this is a guardrail, not a target. Held equal across arms so a latency
 # comparison is not really a comparison of how much each arm was allowed to say.
 MAX_TOKENS = 120
+
+# The default for a *spoken reply*, where a little variation reads as human. Not the default for a
+# grounded answer, which passes its own — see answer.ANSWER_TEMPERATURE.
 TEMPERATURE = 0.3
 
 # How long ollama keeps the fallback model resident after a call. Its default is 5 minutes, which
@@ -85,15 +88,22 @@ def messages(transcript, stage=None):
     ]
 
 
-def openai_chat(arm, msgs, rec, timeout=None):
+def openai_chat(arm, msgs, rec, timeout=None, temperature=None):
     """OpenAI-compatible /chat/completions. Serves every LLM arm — NIM, Groq and ollama all speak it.
 
     `arm.extra["request"]` adds the fields an arm cannot be called without — `reasoning_effort` for
     gpt-oss. It is merged after the shared parameters and deliberately cannot override them, so no
     arm can quietly give itself a bigger budget than the ones it is being compared against.
+
+    `temperature` is per *call*, not per arm, because the two things this repo asks an LLM to do want
+    different sampling and neither is a property of the model: a spoken reply is better for a little
+    variety, and a grounded answer read out of five policy excerpts is not. It is a call option
+    rather than an arm field so that both still run on the same arm and stay comparable — see
+    `answer.ANSWER_TEMPERATURE` for the measurement that made this a parameter.
     """
     body = {"model": arm.provider_model, "messages": msgs,
-            "temperature": TEMPERATURE, "max_tokens": MAX_TOKENS}
+            "temperature": TEMPERATURE if temperature is None else temperature,
+            "max_tokens": MAX_TOKENS}
     for k, v in (arm.extra.get("request") or {}).items():
         body.setdefault(k, v)
 

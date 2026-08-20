@@ -159,7 +159,7 @@ def fallback_for(stage, arm, enabled=True):
     return None if fb.id == arm.id else fb
 
 
-def _dispatch(stage, arm, payload, turn_id, extra, sink=None):
+def _dispatch(stage, arm, payload, turn_id, extra, sink=None, options=None):
     """Run one arm through the logger. `sink` receives the call record, failure included.
 
     The record is handed out rather than returned because on a failure there is no return — and the
@@ -171,10 +171,13 @@ def _dispatch(stage, arm, payload, turn_id, extra, sink=None):
     with log_call(stage, arm, turn_id, **extra) as rec:
         if sink is not None:
             sink.append(rec)
-        return fn(arm, payload, rec)
+        # `options` are call parameters the *backend* takes (a temperature, a timeout), as opposed
+        # to `extra`, which are facts about the call for the log. They are kept apart because they
+        # travel in opposite directions: one goes to the provider, the other to calls.jsonl.
+        return fn(arm, payload, rec, **(options or {}))
 
 
-def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra):
+def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, options=None, **extra):
     """Run `arm`; on a transient failure run the stage's local arm instead.
 
     -> (result, the arm that actually produced it). Callers need the second value because an arm is
@@ -197,11 +200,11 @@ def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra
     if parked and fb is not None:
         reason = f"{arm.id} is rate-limited for another {parked:g}s"
         return _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback,
-                             reason, None, None)
+                             reason, None, None, options)
 
     attempt = []
     try:
-        return _dispatch(stage, arm, payload, turn_id, extra, attempt), arm
+        return _dispatch(stage, arm, payload, turn_id, extra, attempt, options), arm
     except Exception as e:
         if fb is None or not errors.is_transient(e):
             raise
@@ -209,10 +212,11 @@ def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra
             cooldown.block(arm, e.retry_after or DEFAULT_COOLDOWN_S)
         failed_ms = attempt[0].get("latency_ms") if attempt else None
         return _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback,
-                             f"{type(e).__name__}: {e}", failed_ms, e)
+                             f"{type(e).__name__}: {e}", failed_ms, e, options)
 
 
-def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, failed_ms, original):
+def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, failed_ms,
+                  original, options=None):
     """Run `fb` in place of `arm`, loudly. -> (result, fb)."""
     print(f"{stage.upper()} FALLBACK — {reason}\n"
           f"  running {fb.repo_id} ({fb.provider}) locally instead of {arm.repo_id}.",
@@ -220,7 +224,8 @@ def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, 
     if on_fallback is not None:
         on_fallback(stage, arm, fb, reason, failed_ms)
     try:
-        result = _dispatch(stage, fb, payload, turn_id, {**extra, "fallback_for": arm.id})
+        result = _dispatch(stage, fb, payload, turn_id, {**extra, "fallback_for": arm.id},
+                           options=options)
     except Exception as fb_error:
         if original is None:
             raise
@@ -235,10 +240,19 @@ def stt(audio, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     return result
 
 
-def llm(msgs, model_id=None, *, turn_id, on_fallback=None, fallback=True, **extra):
-    """-> the assistant's reply. `msgs` is an OpenAI-shaped message list; see nlu.messages()."""
+def llm(msgs, model_id=None, *, turn_id, on_fallback=None, fallback=True, temperature=None,
+        **extra):
+    """-> the assistant's reply. `msgs` is an OpenAI-shaped message list; see nlu.messages().
+
+    `temperature` reaches the backend rather than the log: a grounded answer asks for 0 and a spoken
+    reply keeps nlu.TEMPERATURE. It is also recorded, because two turns sampled differently are not
+    comparable and a latency table has no way to know.
+    """
+    options = {} if temperature is None else {"temperature": temperature}
     result, _arm = _call("llm", resolve("llm", model_id), msgs, turn_id, on_fallback, fallback,
-                         messages=len(msgs), **extra)
+                         options=options, messages=len(msgs),
+                         temperature=nlu.TEMPERATURE if temperature is None else temperature,
+                         **extra)
     return result
 
 

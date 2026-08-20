@@ -59,6 +59,7 @@ rather than in `src/loop.py` because the mic loop and the recording harness both
 second copy of the routing is how the two quietly stop running the same pipeline.
 """
 import re
+import sys
 from collections import namedtuple
 from contextlib import contextmanager
 
@@ -80,6 +81,16 @@ REFUSAL = "I could not find that in the policy documents I have."
 # How the excerpts are introduced in the user message. Named so a test can assert the context really
 # reached the model rather than only that a call happened.
 CONTEXT_HEADER = "Excerpts from the policy documents:"
+
+# Sampling for the grounded path. Zero, where the spoken-reply path uses nlu.TEMPERATURE = 0.3.
+#
+# Measured, 2026-08-20: the same leave-encashment question asked three times at 0.3 returned two
+# correct refusals and one invented figure ("you will get 12 rupees"). A prompt cannot fix that,
+# because nothing was wrong with the prompt on the two runs where it worked — the answer was being
+# sampled from a distribution that includes the bad one. There is nothing for temperature to buy
+# here anyway: reading five policy excerpts is not a task where variety is a feature, and a gate
+# that cannot reproduce its own number is not a gate.
+ANSWER_TEMPERATURE = 0.0
 
 
 class Answer(namedtuple("Answer", "text sources hits grounded")):
@@ -168,6 +179,101 @@ def is_refusal(text):
     return _normalise(text) == _REFUSAL_NORM
 
 
+# --- the numeric guard --------------------------------------------------------------------------
+# `answer_from_source_v2.md` ends its rule with "Numbers you may say are the ones written in the
+# excerpts". Everything below is that sentence enforced in code, because asking was measured and it
+# is not enough: at temperature 0.3 the same leave-encashment question produced "you will get 12
+# rupees" one run in three, and at temperature 0 it produced a four-sentence answer built on
+# "you have 20 privileged leave, which is more than the 24 days allowed". Both are fluent, both
+# carry citations, and neither number came from a document.
+#
+# The rule is deliberately about the *excerpts* and not the conversation. A figure the person
+# themselves supplied is exactly what a fabricated calculation is built out of, so echoing it back
+# inside an answer is the shape of the failure rather than an innocent restatement.
+
+_DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+_UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+          "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+          "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+          "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+          "seventy": 70, "eighty": 80, "ninety": 90,
+          # Ordinals, because the prompt asks for dates the way a person says them — "the
+          # fourteenth of April" has to match a "14" in the excerpt or every date answer refuses.
+          "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7,
+          "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
+          "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
+          "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
+_SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
+           "million": 1_000_000, "crore": 10_000_000, "crores": 10_000_000}
+_NUMBER_WORD = re.compile(r"[a-z]+")
+
+
+def numbers_in(text, parts=False):
+    """-> the set of numeric values `text` states, digits and words alike.
+
+    "twenty-five thousand" and "25,000" both come out as 25000, because the prompt asks the model to
+    say numbers the way a person does while the excerpts are written the way a document does. A
+    guard comparing surface forms would refuse every correct answer it was ever given.
+
+    `parts` is the asymmetry that makes this usable. Off (the answer side) a word phrase yields only
+    what it means: "twenty-five thousand" is 25000 and nothing else, so the reply is held to the
+    figures it actually asserts. On (the excerpt side) the pieces come too — 25, 5, 20, 1000 — so an
+    excerpt written "25 thousand", or one that happens to spell a component, still counts as having
+    said it. Being generous about what a document contains and strict about what a reply claims is
+    the safe direction: the guard then only ever fires on a number that appears nowhere at all.
+    """
+    found = set()
+    for raw in _DIGITS.findall(text or ""):
+        try:
+            found.add(float(raw.replace(",", "")))
+        except ValueError:
+            continue
+
+    words = _NUMBER_WORD.findall((text or "").lower().replace("-", " "))
+    total = current = 0.0
+    running = False
+
+    def flush():
+        nonlocal total, current, running
+        if running and (total or current):
+            found.add(total + current)
+        total = current = 0.0
+        running = False
+
+    for w in words:
+        if w in _UNITS:
+            current += _UNITS[w]
+            running = True
+            if parts:
+                found.add(float(_UNITS[w]))
+        elif w in _SCALES and running:
+            current = max(current, 1.0) * _SCALES[w]
+            total += current
+            if parts:
+                found.add(current)
+            current = 0.0
+        elif w == "and" and running:
+            continue
+        else:
+            flush()
+    flush()
+    return found
+
+
+def ungrounded_numbers(text, hits):
+    """-> sorted values stated in `text` that appear in none of the excerpts.
+
+    Empty is the good case. A non-empty list means the reply asserts a figure that is not in the
+    documents it cites — invented, or worse, calculated, which is the version that sounds most like
+    a right answer.
+    """
+    context = set()
+    for h in hits:
+        context |= numbers_in(h.text, parts=True)
+    return sorted(numbers_in(text) - context)
+
+
 def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
            model_id=None, on_fallback=None, fallback=True):
     """-> Answer for `transcript`, grounded in the retrieved chunks. Never raises on a miss.
@@ -191,7 +297,7 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     from src import arms                      # imported here: arms imports nlu, which this imports
     text = arms.llm(
         messages(transcript, hits), model_id, turn_id=turn_id,
-        on_fallback=on_fallback, fallback=fallback,
+        on_fallback=on_fallback, fallback=fallback, temperature=ANSWER_TEMPERATURE,
         prompt_file=PROMPT_FILE.name, transcript_chars=len(transcript),
         chunks=len(hits), sources=[h.source for h in hits],
         top_score=round(hits[0].score, 4),
@@ -199,7 +305,24 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
 
     if is_refusal(text):
         return Answer(REFUSAL, [], hits, grounded=False)
+
+    # The numeric guard. A figure that is in no excerpt makes this reply ungrounded whatever else it
+    # says, so it becomes the same refusal a listener would have heard if retrieval had missed —
+    # they are not owed the distinction, and the alternative is a confident wrong number about their
+    # own salary. Recorded on the call record so the rate is visible in runs/calls.jsonl rather than
+    # only in whatever the caller decided to print.
+    invented = ungrounded_numbers(text, hits)
+    if invented:
+        print(f"UNGROUNDED NUMBER — {arms_repr(invented)} appears in no excerpt; refusing instead "
+              f"of speaking it.\n  suppressed reply: {' '.join(text.split())}", file=sys.stderr)
+        return Answer(REFUSAL, [], hits, grounded=False)
+
     return Answer(text, cited(hits), hits, grounded=True)
+
+
+def arms_repr(values):
+    """-> "12, 4" — the invented figures, as a person would read them in a log line."""
+    return ", ".join(f"{v:g}" for v in values)
 
 
 # --- inside a turn (VOX-032) -------------------------------------------------------------------

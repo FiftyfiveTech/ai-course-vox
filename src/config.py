@@ -348,6 +348,27 @@ BARGE_MIN_SPEECH_MS = 200
 # on headphones — see notes/ and ARCHITECTURE.md.
 BARGE_SPEECH_THRESHOLD = 0.7
 
+# --- session length (`make demo`) ------------------------------------------------------------
+# How long a conversational run lasts when it is bounded by the clock rather than by a turn count.
+# Three minutes is a demo: long enough to ask a few things, talk over one of them, and hear the
+# session end by itself. Env-configurable because a dev iterating on a stage wants one or two turns
+# and not three minutes of talking:
+#
+#   VOX_SESSION_MINUTES=0.5 make demo
+#
+# The deadline is only ever checked between turns (src.loop.Budget), so a run overruns by at most
+# one reply — a value smaller than a turn takes means one turn, not a truncated one.
+SESSION_MINUTES = float(os.environ.get("VOX_SESSION_MINUTES", "3"))
+
+# How many consecutive listens may hear nothing before a timed session gives up. A pause inside a
+# conversation is not the end of it, so silence does not stop a timed run the way it stops a
+# `--turns` one — but a muted mic, an unplugged headset or a device the OS handed to something else
+# all look exactly like a thoughtful pause, and without a bound they would spin quietly for the
+# whole three minutes and blame the user for saying nothing. Two, because vad.listen waits 30 s each
+# time: a minute of silence is a broken mic or a person who has walked away, and both want the same
+# answer. Set it to 1 to get the old "silence ends the run" behaviour inside a timed session.
+SESSION_QUIET_LIMIT = int(os.environ.get("VOX_SESSION_QUIET_LIMIT", "2"))
+
 # --- source documents (VOX-029) ---------------------------------------------------------------
 # The PDF corpus the POC answers from, and where the extracted chunks land. Both are gitignored:
 # these are internal HR policies, so the documents and the text pulled out of them are the same

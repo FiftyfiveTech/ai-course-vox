@@ -255,11 +255,13 @@ What `abort()` cannot recall is the output device's own buffer — 0.182 s on th
 device, which is larger than the stop latency itself. So the printed number is when VOX stopped
 *sending*, and `out_latency_s` is logged beside it as the tail that can still be heard.
 
-Barge-in needs a turn after the one being interrupted, so `--turns 2` or more switches it on. The
-last turn of a run is played blocking, which keeps `make demo`'s default single turn exactly as
-VOX-002 and VOX-003 measured it. One consequence worth knowing when reading the logs: a watched
-turn's record closes only once the *next* utterance has been endpointed, because one listener spans
-both — so its `ts` and its printed latency line land after the user has spoken again.
+Barge-in needs a turn after the one being interrupted, so it is on for every reply that has one.
+In a timed session — `--minutes`, which is what `make demo` runs — that is every reply until the
+clock runs out; with `--turns N` it is every reply but the last, and a bare single turn is played
+blocking, exactly as VOX-002 and VOX-003 measured it. One consequence worth knowing when reading
+the logs: a watched turn's record closes only once the *next* utterance has been endpointed,
+because one listener spans both — so its `ts` and its printed latency line land after the user has
+spoken again.
 
 ---
 
@@ -299,7 +301,8 @@ src/
   nlu.py           — the openai-chat backend + the message assembly arms.llm() takes, and
                      load_prompt(), shared by both prompt files; extraction lands in VOX-019
   audio.py         — speaker playback, kept apart from synthesis so VOX-011 can interrupt it
-  loop.py          — one chained turn; `make demo`. Routes through retrieval after STT (VOX-032)
+  loop.py          — chained turns, bounded by a count or by the session clock; `make demo`.
+                     Routes through retrieval after STT (VOX-032)
   confirm.py       — confirmation flow logic (VOX-020, not yet written)
   actions.py       — tool/API calls (read and write) (not yet written)
   tts.py           — TTS backends: kokoro, speecht5, piper
@@ -863,8 +866,9 @@ ones. The alternative was 0.674 — under the weakest answerable by 0.002, which
 not a threshold. A false refusal costs a real employee their answer; a false hit costs one free-tier
 call that ends in the right refusal. Not symmetric, and the floor is set accordingly.
 
-So retrieval alone routes **9/13**. End to end, with the grounded prompt doing the job the floor
-cannot, it routes **13/14** — the 14th being the paternity question, which now answers:
+So retrieval alone routes **9/13**. End to end, with the prompt and the numeric guard below doing
+the job the floor cannot, it routes **14/14** — including the paternity question, which now
+answers:
 
 ```
 Q  How many paternal leaves am I entitled to according to policy
@@ -872,10 +876,12 @@ A  You are entitled to 5 calendar days of paternity leave in one go for your new
    grounded=True  sources=['leave-policy:p12', ...]
 ```
 
-The one that still routes wrong is "how many days of sabbatical leave can I take": the model
-correctly says *"There is no mention of sabbatical leave in the provided excerpts"* — but that is
-not the `REFUSAL` string, so `answer.is_refusal()` reads it as an answer and the turn is logged
-`grounded: true`. The listener is not misled; the grounded *rate* is. VOX-033 has to count that.
+At temperature 0.3 one query routed wrong here — "how many days of sabbatical leave can I take"
+came back as *"There is no mention of sabbatical leave in the provided excerpts"*, which is a
+refusal in substance but not the `REFUSAL` string, so `is_refusal()` read it as an answer and the
+turn logged `grounded: true`. It went away with deterministic sampling, below. It is worth
+remembering as a shape rather than a fixed bug: a paraphrased refusal counts as an answer, and
+VOX-033's rate has to survive that.
 
 ### The prompt had to move too: `answer_from_source_v2.md`
 
@@ -896,6 +902,54 @@ Versioned as a new file rather than edited in place (VOX-018): the numbers in th
 above were measured against v1, and a prompt you can no longer read is a measurement you can no
 longer reproduce.
 
+### Asking was not enough: deterministic sampling and a numeric guard
+
+`answer_from_source_v2.md` forbids computing a figure. A live turn then asked *"if I have a base pay
+of 5000 rupees and 20 privileged leave, then how much will I get in leave encashment?"* and heard:
+
+```
+vox says : 'You will get 12 rupees in leave encashment.'
+  grounded in leave-policy:p10, p11, p7, p8, p9 (top score 0.103, 5 chunks in context)
+```
+
+Asked three times, the same question returned two correct refusals and that. **Nothing was wrong
+with the prompt on the two runs where it worked** — the answer was being sampled from a distribution
+that contains the bad one, at `nlu.TEMPERATURE = 0.3`.
+
+**So the grounded path samples at 0** (`answer.ANSWER_TEMPERATURE`), while a spoken reply keeps 0.3.
+Temperature became a per-*call* option rather than an arm field, so both still run on the same arm
+and stay comparable. Reading five policy excerpts is not a task where variety is a feature, and a
+gate that cannot reproduce its own number is not a gate.
+
+That made it reproducible and still wrong — consistently, now:
+
+> You are entitled to 12 working days of Privilege Leaves every year... Since you have 20 privileged
+> leave, which is 16 days more than the 24-day cap, you will get 16 days in leave encashment.
+
+Fluent, cited, and false twice over: 20 is not more than 24, and no excerpt contains 16.
+
+**So the prompt's own rule is enforced in code.** `answer.ungrounded_numbers()` extracts every figure
+a reply states — digits and words alike, so "twenty-five thousand" and "25,000" are the same number —
+and checks each against the excerpts. A figure that appears in none makes the reply ungrounded, and
+it becomes the same refusal a listener would have heard if retrieval had missed. The suppressed
+reply goes to stderr with the offending number so the refusal can be explained.
+
+Two asymmetries make it usable rather than merely strict:
+
+- **A phrase asserts its value, not its pieces.** "twenty-five thousand" claims 25000; an answer
+  held to 5 and 20 as well would be refused for saying a number correctly. On the *excerpt* side the
+  pieces do count, so a document written "25 thousand" still matches. Generous about what a document
+  contains, strict about what a reply claims.
+- **A number the person supplied is not grounded by having been asked.** The excerpts are the only
+  source. Echoing the caller's own figure back inside an answer is the shape of the fabricated
+  calculation, not an innocent restatement — every wrong variant above was caught on the `20`.
+
+Measured, `make floors` queries end to end: **14/14**, with no answerable query refused by the
+guard — including the ones whose answers really do contain numbers ("twelve working days",
+"25,000", "the eighth of November", "three months", "5 calendar days"). The encashment question now
+refuses. That is blunter than the ideal answer (state the rule, let the person apply it) and it is
+the right failure: a refusal costs a question, a wrong rupee figure costs trust.
+
 ### What this does not fix
 
 - **STT is upstream of all of it.** Spoken, the same encashment question came back as *"how much my
@@ -904,6 +958,10 @@ longer reproduce.
 - **A 33M encoder does not know when it is lost.** Every question now reaches the model unless both
   floors reject it, so the refusal budget has shifted from arithmetic to tokens. A larger encoder is
   the obvious next arm to measure, and it is a row in `config.EMBED_ARMS`.
+- **The numeric guard checks presence, not meaning.** "You will get 12 rupees" would survive it if
+  some excerpt happened to contain a 12 — as one did. What killed that reply was the caller's own
+  `20`, not the wrong unit on the `12`. Catching a number that is real but means something else
+  needs a different mechanism than this one.
 - **The dev set is 13 queries**, all written before any of this was known. It is a starting point,
   not a distribution; the queries in this section are not in it, and adding them is the first thing
   VOX-033 should do.

@@ -117,3 +117,36 @@ Lessons:    (1) The floor was never the safety mechanism — the prompt is. Thre
             the turn logged `grounded: true`. VOX-033's rate has to handle that — still open.
             (5) The dev set is 13 queries written before any of this was known. Every question in
             this retro would have caught something and none of them is in it.
+
+## Numeric guard + deterministic grounded answers  (2026-08-20, Vimal as Builder)
+
+Same branch, same session, one more live-turn failure. `answer_from_source_v2.md` forbade computing
+a figure; the model did it anyway.
+
+Executed:   Temperature became a per-call option (`arms.llm(temperature=...)` threaded to the
+            backend through a new `options` channel in `_call`/`_dispatch`), and the grounded path
+            asks for 0 while a spoken reply keeps `nlu.TEMPERATURE = 0.3`. Then the prompt's own
+            rule — "numbers you may say are the ones written in the excerpts" — enforced in code:
+            `answer.numbers_in()` / `ungrounded_numbers()`, and a reply stating a figure that
+            appears in no excerpt becomes the refusal, with the suppressed text on stderr. 14 tests.
+
+Deviations: The guard refuses rather than repairing. Stating the rule instead of the number would
+            be the nicer answer and is what the prompt asks for; a refusal is what can be
+            guaranteed. Chose the guarantee.
+
+Numbers:    `uv run python scripts/ask.py`-driven probe, "if I have a base pay of 5000 rupees and 20
+            privileged leave..." asked 3x at temperature 0.3 -> 2 correct refusals, 1 "You will get
+            12 rupees in leave encashment." At temperature 0 -> consistently wrong instead:
+            "since you have 20 privileged leave, which is 16 days more than the 24-day cap, you
+            will get 16 days". With the guard -> refuses, 3/3, caught on the caller's own 20.
+            Dev set end to end: 13/14 -> **14/14**, no answerable query refused by the guard.
+            `uv run pytest tests/unit -q` -> 300 passed.
+
+Lessons:    (1) A prompt instruction is a request, not a constraint. The two runs where v2 worked
+            were not evidence that v2 worked — they were the same distribution, sampled twice.
+            (2) Temperature 0 makes a wrong answer reproducible, which is progress and not a fix.
+            It is worth having anyway: a gate that cannot reproduce its own number is not a gate.
+            (3) Where a rule can be checked mechanically, check it. The guard is ~40 lines and
+            catches every variant of an invented figure the model produced across six runs.
+            (4) The guard checks presence, not meaning: "12 rupees" would have survived on its own,
+            because some excerpt did contain a 12. It died on the caller's own 20. Still open.
