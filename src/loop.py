@@ -22,7 +22,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from src import arms, audio, nlu, state, vad
+from src import arms, audio, confirm, nlu, state, vad
 from src.config import BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE
 from src.errors import RateLimited
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
@@ -152,6 +152,37 @@ def one_turn(chosen, pending=None, watch=False):
             audio.play(speech.audio, sample_rate=speech.sample_rate,
                        on_first_audio=turn.first_audio)
             next_cap = None
+
+        # VOX-020: if the LLM asked for confirmation, listen for yes/no.
+        if confirm.needs_confirmation(turn_state):
+            print("  [confirmation required — listening for yes/no]", flush=True)
+            yn_cap = vad.listen(announce=False)
+            if yn_cap is None:
+                print("  nothing heard — treating as cancel")
+                yn_response = "no"
+            else:
+                with turn.stage("stt"):
+                    yn_transcript = arms.stt(yn_cap.segment, chosen["stt"].id,
+                                             turn_id=turn_id, on_fallback=turn.fallback)
+                yn_response = confirm.classify_response(yn_transcript)
+                print(f"  confirmation response: {yn_transcript!r} -> {yn_response}")
+
+            if yn_response == "yes":
+                print("  confirmed — action would proceed here")
+            elif yn_response == "no":
+                cancel_text = confirm.cancelled_reply()
+                with turn.stage("tts"):
+                    cancel_speech = arms.tts(cancel_text, chosen["tts"].id,
+                                             turn_id=turn_id, on_fallback=turn.fallback)
+                audio.play(cancel_speech.audio, sample_rate=cancel_speech.sample_rate)
+                print(f"  cancelled: {cancel_text!r}")
+            else:
+                unclear_text = confirm.unclear_reply()
+                with turn.stage("tts"):
+                    unclear_speech = arms.tts(unclear_text, chosen["tts"].id,
+                                              turn_id=turn_id, on_fallback=turn.fallback)
+                audio.play(unclear_speech.audio, sample_rate=unclear_speech.sample_rate)
+                print(f"  unclear: {unclear_text!r}")
 
     # A watched turn's record closes only once the *next* utterance has been endpointed, because one
     # listener spans both. So this line, and the turn's `ts`, land after the user has spoken again.
