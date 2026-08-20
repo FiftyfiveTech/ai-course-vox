@@ -30,17 +30,21 @@ runs with different arms cannot be quietly averaged together.
 
 A turn about the policy documents is answered *from* them (VOX-032). After STT the transcript goes
 to retrieval, and the chunks that clear the score floor are what the reply is written from — with
-the doc:page it came from printed under the answer and logged on the turn line. A question the
-documents do not cover retrieves nothing and is answered by the plain reply prompt, exactly as
-every turn was before. `--no-kb` forces that older path for the whole run, which is how the two are
-compared without editing code.
+the doc:page it came from printed under the answer and logged on the turn line. `--no-kb` forces
+that path off for a whole run, which is how the two are compared without editing code.
+
+What retrieval does *not* claim is a request rather than a question, and it goes to VOX-019's
+structured extractor: `state.build` returns the reply to speak together with the intent, the
+entities and the `next_action` that VOX-020's confirmation gate reads — so an action that changes
+data is read back and waits for a spoken yes or no before it proceeds. One LLM call per turn on
+either path; which one ran is visible on the printed line and on the turn record.
 """
 import argparse
 import sys
 import time
 from collections import namedtuple
 
-from src import answer as answer_mod, arms, audio, vad
+from src import answer as answer_mod, arms, audio, confirm, state, vad
 from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE, SESSION_MINUTES,
                         SESSION_QUIET_LIMIT)
 from src.errors import RateLimited
@@ -213,13 +217,33 @@ def one_turn(chosen, pending=None, watch=False, idx=None):
             print("empty transcript from STT — not calling the LLM.", file=sys.stderr)
             return TurnResult(False, False, None)
 
-        # VOX-032. Retrieve first, then answer from what came back: chunks that cleared the floor
-        # go through the grounded prompt, an empty list goes to the plain reply prompt exactly as
-        # every turn did before. `idx=None` (no corpus on this machine) skips retrieval entirely —
-        # announced once at startup, not once per turn.
+        # Two tickets rewrote this stage and retrieval is what decides which one runs. VOX-032
+        # asks the documents first: a question they cover is answered *from* them, and a policy
+        # answer changes no data, so there is no state to extract and nothing to confirm. What
+        # retrieval does not claim is a request rather than a question, and that is VOX-019's —
+        # `state.build` writes the reply *and* the intent/next_action that VOX-020's gate reads
+        # further down. `idx=None` (no corpus on this machine) skips retrieval entirely and every
+        # turn takes the second path; that is announced once at startup, not once per turn.
+        #
+        # One LLM call per turn either way. Routing on the measured floor rather than running both
+        # prompts is what keeps t_llm comparable with every turn logged before this merge — two
+        # calls a turn would double the stage that most of the VOX-003 budget is spent in.
+        turn_state = None
+
+        def extract_state(text, tid, model_id=None, **_):
+            """The plain-reply path, as VOX-019 now writes it: structured state, and its `reply`
+            field is what gets spoken. Anything retrieval vouched for goes to the grounded prompt
+            instead and never arrives here."""
+            nonlocal turn_state
+            turn_state = state.build(text, tid, model_id=model_id)
+            return turn_state.reply
+
         reply = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
-                                      model_id=chosen["llm"].id, on_fallback=turn.fallback)
-        print(f"vox says : {reply.text!r}")
+                                      model_id=chosen["llm"].id, on_fallback=turn.fallback,
+                                      plain=extract_state)
+        print(f"vox says : {reply.text!r}" + (
+            f"  [intent={turn_state.intent} conf={turn_state.confidence:.2f} "
+            f"next={turn_state.next_action}]" if turn_state is not None else ""))
         print("  " + grounding(reply, kb=idx is not None))
 
         try:
@@ -246,6 +270,39 @@ def one_turn(chosen, pending=None, watch=False, idx=None):
             audio.play(speech.audio, sample_rate=speech.sample_rate,
                        on_first_audio=turn.first_audio)
             next_cap = None
+
+        # VOX-020: if the LLM asked for confirmation, listen for yes/no. A grounded answer has no
+        # TurnState and cannot reach this — it read a document out loud, which is not an action to
+        # confirm.
+        if turn_state is not None and confirm.needs_confirmation(turn_state):
+            print("  [confirmation required — listening for yes/no]", flush=True)
+            yn_cap = vad.listen(announce=False)
+            if yn_cap is None:
+                print("  nothing heard — treating as cancel")
+                yn_response = "no"
+            else:
+                with turn.stage("stt"):
+                    yn_transcript = arms.stt(yn_cap.segment, chosen["stt"].id,
+                                             turn_id=turn_id, on_fallback=turn.fallback)
+                yn_response = confirm.classify_response(yn_transcript)
+                print(f"  confirmation response: {yn_transcript!r} -> {yn_response}")
+
+            if yn_response == "yes":
+                print("  confirmed — action would proceed here")
+            elif yn_response == "no":
+                cancel_text = confirm.cancelled_reply()
+                with turn.stage("tts"):
+                    cancel_speech = arms.tts(cancel_text, chosen["tts"].id,
+                                             turn_id=turn_id, on_fallback=turn.fallback)
+                audio.play(cancel_speech.audio, sample_rate=cancel_speech.sample_rate)
+                print(f"  cancelled: {cancel_text!r}")
+            else:
+                unclear_text = confirm.unclear_reply()
+                with turn.stage("tts"):
+                    unclear_speech = arms.tts(unclear_text, chosen["tts"].id,
+                                              turn_id=turn_id, on_fallback=turn.fallback)
+                audio.play(unclear_speech.audio, sample_rate=unclear_speech.sample_rate)
+                print(f"  unclear: {unclear_text!r}")
 
     # A watched turn's record closes only once the *next* utterance has been endpointed, because one
     # listener spans both. So this line, and the turn's `ts`, land after the user has spoken again.

@@ -54,7 +54,8 @@ anything else is treated as an answer. That direction is deliberate — a near-m
 citations, which is safer than silently dropping the provenance off a reply that did answer.
 
 `turn_reply()` at the bottom is VOX-032: the same two paths as seen from inside a spoken turn —
-retrieve, and route to `answer()` or to the plain `nlu.reply()` on what comes back. It lives here
+retrieve, and route to `answer()` or to the plain reply on what comes back (`nlu.reply` unless the
+caller supplies its own; the live loop supplies VOX-019's `state.build`). It lives here
 rather than in `src/loop.py` because the mic loop and the recording harness both need it and a
 second copy of the routing is how the two quietly stop running the same pipeline.
 """
@@ -359,7 +360,7 @@ def knowledge_base(echo=print):
 
 
 def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallback=None,
-               fallback=True, k=None, floor=None):
+               fallback=True, k=None, floor=None, plain=None):
     """One turn's reply: grounded in the documents when they cover the question, plain when not.
 
     -> Reply(text, answer, hits). The whole of VOX-032's routing decision, in one place because
@@ -382,6 +383,13 @@ def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallb
     stamped on it — both so a turn line can be read afterwards without guessing which path it took.
     Left as None (a caller with no turn record, i.e. a test) nothing is timed and the routing is
     unchanged.
+
+    `plain` replaces what the un-retrieved path calls, with the same signature as `nlu.reply` and
+    the same job: transcript in, spoken text out. It exists because VOX-019 gave the live loop a
+    second thing to want from that call — the structured TurnState that VOX-020's confirmation gate
+    reads — and the alternative was either a second LLM call per turn or a copy of this routing
+    inside `src/loop.py`. The routing itself is not negotiable by a caller: what retrieval vouched
+    for still goes to the grounded prompt, whatever `plain` is.
     """
     hits = []
     if idx is not None:
@@ -400,8 +408,8 @@ def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallb
             # Nothing cleared the floor, or there is no corpus at all. Either way there is nothing
             # to be grounded in, so the turn behaves as it did before this ticket existed.
             got = None
-            text = nlu.reply(transcript, turn_id, model_id=model_id,
-                             on_fallback=on_fallback, fallback=fallback)
+            text = (plain or nlu.reply)(transcript, turn_id, model_id=model_id,
+                                        on_fallback=on_fallback, fallback=fallback)
 
     if turn is not None:
         turn.grounding(hits, grounded=bool(got and got.grounded),

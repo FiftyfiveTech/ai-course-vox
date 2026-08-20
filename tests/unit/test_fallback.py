@@ -24,6 +24,7 @@ import types
 import httpx
 import pytest
 
+from conftest import fake_state
 from src import arms, cooldown, errors, loop, nlu, stt
 from src.config import ARMS, FALLBACKS, LLM_ARMS, PIPELINE, STT_ARMS, TTS_ARMS, resolve
 from tests.unit.test_rate_limit import FakeResponse, _capture, hosted_arm, rate_limited, serve
@@ -372,7 +373,9 @@ def raising_post(monkeypatch, module, exc):
 def run_turn(monkeypatch, stt_arm):
     """One full loop.one_turn with everything but STT stubbed out. -> what one_turn returned."""
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
-    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: "On the fourth.")
+    # Since the VOX-019/020 merge the un-retrieved path is the structured extractor, so this
+    # is the call that writes the spoken reply on a turn with no index behind it.
+    monkeypatch.setattr(loop.state, "build", lambda *a, **kw: fake_state("On the fourth."))
     monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: None)
     monkeypatch.setitem(arms._MODULES["tts"].BACKENDS, TTS_ARMS[0].backend,
                         lambda arm, text, rec: [0.0] * 240)

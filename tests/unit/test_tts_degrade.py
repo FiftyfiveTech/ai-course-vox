@@ -17,7 +17,8 @@ import json
 
 import pytest
 
-from src import arms, loop, nlu
+from conftest import fake_state          # same directory; pytest puts tests/unit on sys.path
+from src import arms, loop
 from src.config import LLM_ARMS, STT_ARMS, TTS_ARMS
 
 DEFAULTS = {"stt": STT_ARMS[0], "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]}
@@ -46,7 +47,9 @@ def turn(monkeypatch):
     played = []
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: FakeCapture())
     monkeypatch.setattr(loop.arms, "stt", lambda *a, **kw: "when was I paid")
-    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: ANSWER)
+    # The un-retrieved path is VOX-019's extractor since the merge — one_turn is called here with
+    # no index, so this is the call that produces the reply, and `nlu.reply` is no longer on it.
+    monkeypatch.setattr(loop.state, "build", lambda *a, **kw: fake_state(ANSWER))
     monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: played.append(kw) or None)
     return played
 

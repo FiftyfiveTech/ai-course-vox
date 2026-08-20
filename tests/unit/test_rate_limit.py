@@ -20,6 +20,7 @@ import types
 import httpx
 import pytest
 
+from conftest import fake_state
 from src import arms, errors, loop, nlu, stt
 from src.config import LLM_ARMS, STT_ARMS, TTS_ARMS
 from src.errors import RateLimited
@@ -239,7 +240,7 @@ def test_a_rate_limited_turn_falls_back_and_still_records_the_refusal(monkeypatc
     monkeypatch.setattr(loop.arms, "select", lambda args: {
         "stt": remote, "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
-    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: "On the fourth.")
+    monkeypatch.setattr(loop.state, "build", lambda *a, **kw: fake_state("On the fourth."))
     monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: None)
     serve(monkeypatch, stt, rate_limited())
     local_stt(monkeypatch, "when was I paid")
@@ -273,7 +274,7 @@ def test_a_rate_limit_never_retries_the_same_arm(monkeypatch, capsys):
     monkeypatch.setattr(loop.arms, "select", lambda args: {
         "stt": remote, "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
-    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: "On the fourth.")
+    monkeypatch.setattr(loop.state, "build", lambda *a, **kw: fake_state("On the fourth."))
     silent_speaker(monkeypatch)
     posts = serve(monkeypatch, stt, rate_limited())
     local_stt(monkeypatch, "when was I paid")

@@ -29,7 +29,8 @@ from src.config import LLM_ARMS, STT_ARMS, TTS_ARMS
 from src.retrieval import Index
 from src.telemetry import STAGES, TURN_FIELDS, TurnTimer
 
-from test_answer import fake_llm            # same directory; pytest puts tests/unit on sys.path
+from conftest import fake_state             # same directory; pytest puts tests/unit on sys.path
+from test_answer import fake_llm
 from test_retrieval import CHUNKS
 
 DEFAULTS = {"stt": STT_ARMS[0], "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]}
@@ -268,10 +269,15 @@ def test_one_turn_speaks_the_grounded_answer_and_logs_its_sources(monkeypatch, i
 
 def test_one_turn_without_a_knowledge_base_behaves_as_it_did_before_this_ticket(monkeypatch,
                                                                                 turns_log):
-    """`--no-kb`, and every clean clone. The turn still runs; nothing claims to be grounded."""
+    """`--no-kb`, and every clean clone. The turn still runs; nothing claims to be grounded.
+
+    What that path calls changed in the VOX-019/020 merge — it is the structured extractor now, not
+    `nlu.reply` — but what this test asserts did not: the turn speaks, and the record says plainly
+    that nothing was retrieved and nothing was grounded.
+    """
     import json
 
-    fake_llm(monkeypatch, reply="I can help with that.")
+    monkeypatch.setattr(loop.state, "build", lambda *a, **kw: fake_state("I can help with that."))
     said = spoken_turn(monkeypatch)
 
     result = loop.one_turn(DEFAULTS, idx=None)
