@@ -1,0 +1,63 @@
+[
+  {
+    "id": "ml_001",
+    "language": "fr",
+    "text": "enregistre quatre heures sur le projet VOX aujourd'hui",
+    "english_gloss": "log four hours on VOX project today",
+    "gold": {
+      "intent": "log_hours",
+      "duration": "4h",
+      "project": "vox project",
+      "date": "2026-08-18"
+    }
+  },
+  {
+    "id": "ml_002",
+    "language": "fr",
+    "text": "reserve une reunion d'une heure avec Priya demain a quinze heures",
+    "english_gloss": "book a one hour meeting with Priya tomorrow at three pm",
+    "gold": {
+      "intent": "book_meeting",
+      "person": [
+        "priya"
+      ],
+      "duration": "1h",
+      "date": "2026-08-19",
+      "time": "15:00"
+    }
+  },
+  {
+    "id": "ml_003",
+    "language": "fr",
+    "text": "rappelle a Kiran de soumettre la feuille de temps vendredi a dix-sept heures",
+    "english_gloss": "remind Kiran to submit the timesheet on Friday at five pm",
+    "gold": {
+      "intent": "set_reminder",
+      "person": [
+        "kiran"
+      ],
+      "time": "17:00",
+      "date": "2026-08-21"
+    }
+  },
+  {
+    "id": "ml_004",
+    "language": "fr",
+    "text": "quelles reunions ai-je demain",
+    "english_gloss": "what meetings do I have tomorrow",
+    "gold": {
+      "intent": "query_calendar",
+      "date": "2026-08-19"
+    }
+  },
+  {
+    "id": "ml_005",
+    "language": "fr",
+    "text": "montre mon planning pour cette semaine",
+    "english_gloss": "show me my schedule for this week",
+    "gold": {
+      "intent": "query_calendar",
+      "date": "week of 2026-08-17"
+    }
+  }
+]
