@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model test gate demo turn arms board clean
+.PHONY: setup fallback-model test gate demo barge turn arms board clean
 .DEFAULT_GOAL := help
 
 help:
@@ -6,6 +6,7 @@ help:
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    run the thing end to end (needs a mic)"
+	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
 	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
@@ -46,6 +47,13 @@ gate:
 # First run downloads the Kokoro weights (~350 MB) and the faster-whisper-base fallback (~150 MB).
 demo:
 	uv run python -m src.loop
+
+# Barge-in (VOX-011). Every turn but the last plays its reply with the mic still open, so talking
+# over VOX stops it mid-sentence, prints the stop latency in ms, and feeds the words that stopped it
+# into the next turn. Wear headphones: there is no echo cancellation, so on open speakers silero
+# hears Kokoro and the reply interrupts itself. See ARCHITECTURE.md § Barge-in.
+barge:
+	uv run python -m src.loop --turns 3
 
 # The same chain driven from a recording instead of the mic, so the VOX-003 latency split can be
 # reproduced without a person at the keyboard. Still plays the reply — time_to_first_audio is not

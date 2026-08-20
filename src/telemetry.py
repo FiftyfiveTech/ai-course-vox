@@ -139,6 +139,30 @@ class TurnTimer:
         self.extra[f"{stage}_failed_ms"] = failed_ms
         self.extra.setdefault("fell_back", []).append(stage)
 
+    def barge(self, stop_ms, played_s, reply_s, out_latency_s=None):
+        """The user talked over this reply and it was cut short (VOX-011).
+
+        `stop_ms` is measured from the first speech frame, not from the moment the decision was
+        made, so BARGE_MIN_SPEECH_MS is inside the number rather than hidden behind it. It is the
+        interval between the user starting to speak and VOX stopping sending samples.
+
+        `out_latency_s` is the output device's buffer, which `abort()` cannot recall. Recorded
+        beside the stop latency because the two together bound what the user actually heard, and
+        without it the printed number reads as silence-by-then, which it is not.
+
+        The five-field split is untouched: this turn ran every stage and did reach first audio, so
+        it stays in the latency percentiles the phase gates read. Being interrupted is a fact about
+        the reply, not a failed turn.
+        """
+        self.extra["barged_in"] = True
+        self.extra["barge_stop_ms"] = stop_ms
+        self.extra["played_s"] = played_s
+        self.extra["reply_s"] = reply_s
+        self.extra["cut_s"] = round(reply_s - played_s, 3)
+        # Written even when unknown, for the reason TURN_FIELDS gives: a field that vanishes when it
+        # was not measured reads as a zero-length tail, which is the flattering answer.
+        self.extra["out_latency_s"] = out_latency_s
+
     def vad(self, capture):
         """Adopt the endpointer's marks: t_vad, and the origin the whole turn is measured from."""
         self.speech_end_t = capture.speech_end_t
