@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOX Day 1 — Turn Loop Concepts</title>
+<style>
+  :root{--ink:#1a2b3c;--acc:#0b6e4f;--warn:#b3541e;--bg:#f6f8f7;--card:#fff;--line:#dce3e0;--grid:#e8edea;--chatbg:#fafcfb;--accfg:#fff}
+  html.dark{--ink:#e4ebe7;--acc:#3fb489;--warn:#e08a52;--bg:#101614;--card:#1a2320;--line:#2c3833;--grid:#182019;--chatbg:#141c18;--accfg:#08130e}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.55 system-ui,sans-serif;color:var(--ink);background:
+    linear-gradient(var(--bg),var(--bg)),
+    repeating-linear-gradient(0deg,transparent,transparent 23px,var(--grid) 24px),
+    repeating-linear-gradient(90deg,transparent,transparent 23px,var(--grid) 24px);}
+  header{position:relative;background:var(--acc);color:var(--accfg);padding:14px 22px}
+  header h1{margin:0;font-size:19px} header p{margin:2px 0 0;opacity:.85;font-size:13px}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;max-width:1200px;margin:18px auto;padding:0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  .card h2{margin:0 0 8px;font-size:16px;color:var(--acc)}
+  .card h3{margin:14px 0 6px;font-size:14px}
+  .concept{border-left:4px solid var(--acc);padding-left:12px;margin:10px 0}
+  .concept b{display:block}
+  .pit{color:var(--warn);font-size:13px}
+  .q{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:8px}
+  .q p{margin:0 0 8px;font-weight:600}
+  .q label{display:block;margin:4px 0;cursor:pointer;font-weight:400}
+  textarea{width:100%;min-height:56px;border:1px solid var(--line);border-radius:6px;padding:8px;font:inherit;resize:vertical;background:var(--card);color:var(--ink)}
+  button{background:var(--acc);color:var(--accfg);border:0;border-radius:8px;padding:10px 18px;font:600 15px system-ui;cursor:pointer}
+  button:disabled{background:#9bb5ab;cursor:default}
+  #chatlog{height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:8px;background:var(--chatbg);border:1px solid var(--line);border-radius:8px}
+  .msg{max-width:88%;padding:8px 11px;border-radius:10px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
+  .msg.user{align-self:flex-end;background:var(--acc);color:var(--accfg)}
+  .msg.coach{align-self:flex-start;background:var(--card);border:1px solid var(--line)}
+  .chatrow{display:flex;gap:8px;margin-top:10px}
+  .chatrow textarea{min-height:44px;flex:1}
+  .sticky{position:sticky;top:14px}
+  video{width:100%;border-radius:8px;background:#000}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>VOX Day 1 — Turn Loop, Telemetry, Fallback, Barge-in</h1>
+  <p>Primer: docs/learning/vox-day1-concepts.md · answer, hit DONE, Claude grades in chat →</p>
+  <button id="themebtn" style="position:absolute;top:14px;right:18px;padding:6px 12px;font-size:13px">🌙 dark</button>
+</header>
+<main>
+<section>
+
+  <div class="card" id="vidcard1" style="display:none">
+    <h2>🎬 Video: turn loop, arms and the latency split</h2>
+    <video controls preload="metadata" src="videos/vox-day1-pipeline-latency.mp4"></video>
+  </div>
+  <div class="card" id="vidcard2" style="display:none">
+    <h2>🎬 Video: fallback, cooldown and barge-in</h2>
+    <video controls preload="metadata" src="videos/vox-day1-fallback-bargein.mp4"></video>
+  </div>
+
+  <div class="card">
+    <h2>Concepts (60-second read)</h2>
+    <div class="concept"><b>1 · Stage placement</b> VAD and TTS local, STT and NLU remote; declared in <code>config.PIPELINE</code> and asserted by <code>tests/unit/test_fallback.py</code>.<span class="pit">Pitfall: reordering the arm tables moves a stage across the network boundary unnoticed.</span></div>
+    <div class="concept"><b>2 · Arms as data</b> <code>src/arms.py</code> is the only interface, <code>src/config.py</code> the only table; arms named by HF repo id, <code>repo/id@provider</code> when two providers serve the same weights.<span class="pit">Pitfall: <code>if provider == "groq"</code> leaking into feature code.</span></div>
+    <div class="concept"><b>3 · Two logs, one <code>turn_id</code></b> <code>runs/calls.jsonl</code> = per call (cost, provider latency); <code>runs/turns.jsonl</code> = per turn (five-field split + <code>time_to_first_audio</code>).<span class="pit">Pitfall: logging only calls — the 0.25–0.84 s device-open belongs to no model call.</span></div>
+    <div class="concept"><b>4 · The budget misses on purpose</b> Target &lt; 2 s, measured 5.6–20.0 s (n=4). The budget column is kept as written so the miss stays visible.<span class="pit">Pitfall: reading n=4 as a distribution — every stage varies 2–4× on identical input.</span></div>
+    <div class="concept"><b>5 · Narrow fallback</b> 429 / timeout / 5xx degrade to a local arm; 401, missing credential and an empty reasoning reply deliberately do not.<span class="pit">Pitfall: a fallback turn compared against a clean one — hence <code>fell_back</code> and <code>fallback_for</code>.</span></div>
+    <div class="concept"><b>6 · Cooldown</b> A 429's <code>Retry-After</code> parks that arm (60 s default); in-memory and process-local by design.<span class="pit">Pitfall: a doomed round-trip every turn turns a pace limit into a shut-off.</span></div>
+    <div class="concept"><b>7 · Barge-in</b> No kill, no second listener: <code>Playback.abort()</code> stops the device being handed samples, and the same <code>listen()</code> captures the interrupting utterance.<span class="pit">Pitfall: open speakers — no AEC, so silero hears Kokoro and the reply cuts itself.</span></div>
+    <div class="concept"><b>8 · Confirmation</b> Read-back plus an affirmative labelled <code>intent=confirm</code> for every write action; max two re-asks, then abort and log.<span class="pit">Pitfall: treating silence or a repeat of the command as consent.</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Quiz</h2>
+
+    <div class="q" data-q="1"><p>1. Why does VAD run locally while STT runs on a free tier?</p>
+      <label><input type="radio" name="q1" value="a"> a. Silero is too large to host remotely</label>
+      <label><input type="radio" name="q1" value="b"> b. VAD runs per 32 ms frame — a network hop per frame is not a design; STT is worth the hop</label>
+      <label><input type="radio" name="q1" value="c"> c. Groq does not serve VAD models</label>
+    </div>
+
+    <div class="q" data-q="2"><p>2. A test asserts each stage's default arm against <code>config.PIPELINE</code>. What does that test catch?</p>
+      <label><input type="radio" name="q2" value="a"> a. A model that stopped being served</label>
+      <label><input type="radio" name="q2" value="b"> b. A reorder of the arm tables silently moving a stage across the local/remote boundary</label>
+      <label><input type="radio" name="q2" value="c"> c. A wrong Hugging Face repo id</label>
+    </div>
+
+    <div class="q" data-q="3"><p>3. Why are calls and turns two files rather than one?</p>
+      <label><input type="radio" name="q3" value="a"> a. JSONL files have a size limit</label>
+      <label><input type="radio" name="q3" value="b"> b. They answer different questions — cost per call vs where a turn's wall clock went — and time that belongs to no call only shows up in the turn record</label>
+      <label><input type="radio" name="q3" value="c"> c. The turn record is written by a different process</label>
+    </div>
+
+    <div class="q" data-q="4"><p>4. <code>time_to_first_audio</code> starts at the last frame silero called speech, not at the endpoint decision. Why?</p>
+      <label><input type="radio" name="q4" value="a"> a. The endpoint decision has no timestamp</label>
+      <label><input type="radio" name="q4" value="b"> b. It makes the number smaller and easier to hit</label>
+      <label><input type="radio" name="q4" value="c"> c. The user has been waiting since they stopped talking, so the VAD hangover belongs inside the number</label>
+    </div>
+
+    <div class="q" data-q="5"><p>5. A 401 from the STT provider does not fall back to the local arm. Why is that the right call?</p>
+      <label><input type="radio" name="q5" value="a"> a. Local arms cannot transcribe without a key either</label>
+      <label><input type="radio" name="q5" value="b"> b. A local arm would return a plausible transcript and hide a broken credential until it turns up in a WER table</label>
+      <label><input type="radio" name="q5" value="c"> c. 401s are not retryable by HTTP convention</label>
+    </div>
+
+    <div class="q" data-q="6"><p>6. Barge-in uses <code>abort()</code> rather than <code>stop()</code> because…</p>
+      <label><input type="radio" name="q6" value="a"> a. <code>stop()</code> drains the buffer first, which is the opposite of interrupting</label>
+      <label><input type="radio" name="q6" value="b"> b. <code>stop()</code> is not available on the callback thread</label>
+      <label><input type="radio" name="q6" value="c"> c. <code>abort()</code> also clears the device's hardware buffer</label>
+    </div>
+
+    <div class="q" data-q="7"><p>7. A fallback turn is logged with <code>fell_back</code> and <code>&lt;stage&gt;_model</code> rewritten to the arm that actually ran. What breaks if that accounting is missing? (own words)</p>
+      <textarea name="q7" placeholder="Your reasoning…"></textarea>
+    </div>
+
+    <div class="q" data-q="8"><p>8. The cooldown is in-memory and process-local on purpose. Argue both sides, then say why the volatile version wins here. (own words)</p>
+      <textarea name="q8" placeholder="Your reasoning…"></textarea>
+    </div>
+
+    <div class="q" data-q="9"><p>9. The measured budget misses by 3–10×, and the budget column was kept as written rather than edited to match. When is keeping a wrong number in a doc the right move, and what has to accompany it? (own words)</p>
+      <textarea name="q9" placeholder="Your reasoning…"></textarea>
+    </div>
+
+    <button id="donebtn">DONE — send answers to Claude</button>
+    <span id="donenote" style="margin-left:10px;font-size:13px;color:var(--warn)"></span>
+  </div>
+</section>
+
+<aside class="sticky">
+  <div class="card">
+    <h2>Coach chat</h2>
+    <div id="chatlog"></div>
+    <div class="chatrow">
+      <textarea id="chatinput" placeholder="Ask anything… (Enter=send)"></textarea>
+      <button id="chatsend">Send</button>
+    </div>
+  </div>
+</aside>
+</main>
+
+<script>
+const KEY = {q1:'b', q2:'b', q3:'b', q4:'c', q5:'b', q6:'a'};
+
+// --- theme
+const themebtn = document.getElementById('themebtn');
+function setTheme(dark){
+  document.documentElement.classList.toggle('dark', dark);
+  themebtn.textContent = dark ? '☀️ light' : '🌙 dark';
+  localStorage.setItem('coach-theme', dark ? 'dark' : 'light');
+}
+themebtn.addEventListener('click', ()=> setTheme(!document.documentElement.classList.contains('dark')));
+setTheme(localStorage.getItem('coach-theme') ? localStorage.getItem('coach-theme')==='dark'
+         : matchMedia('(prefers-color-scheme: dark)').matches);
+
+function send(text, tag){
+  return fetch('/send', {method:'POST', body: JSON.stringify({text, tag})});
+}
+
+// --- video cards auto-show when mp4 exists
+[['vidcard1','videos/vox-day1-pipeline-latency.mp4'],
+ ['vidcard2','videos/vox-day1-fallback-bargein.mp4']].forEach(([id,src])=>{
+  fetch(src,{method:'HEAD'}).then(r=>{if(r.ok)document.getElementById(id).style.display=''}).catch(()=>{});
+});
+
+// --- DONE
+document.getElementById('donebtn').addEventListener('click', ()=>{
+  const lines = ['SESSION ANSWERS — vox-day1 turn loop concepts'];
+  let unanswered = [];
+  for (const q of ['q1','q2','q3','q4','q5','q6']){
+    const pick = document.querySelector(`input[name=${q}]:checked`);
+    if(!pick){unanswered.push(q); continue;}
+    const ok = pick.value === KEY[q] ? 'CORRECT' : `WRONG (picked ${pick.value}, key ${KEY[q]})`;
+    lines.push(`${q}: picked "${pick.value}" — ${ok}`);
+  }
+  for (const q of ['q7','q8','q9']){
+    const t = document.querySelector(`textarea[name=${q}]`).value.trim();
+    if(!t){unanswered.push(q); continue;}
+    lines.push(`${q} (free text): ${t}`);
+  }
+  if(unanswered.length){
+    document.getElementById('donenote').textContent = 'Unanswered: '+unanswered.join(', ')+' — answer or hit DONE again to submit partial.';
+    if(!document.getElementById('donebtn').dataset.warned){
+      document.getElementById('donebtn').dataset.warned = '1';
+      return;
+    }
+  }
+  lines.push('');
+  lines.push('TASKS FOR CLAUDE: grade the free-text answers (q7-q9), challenge any weak reasoning, coach the wrong picks, append what was learned to docs/learning/retros.md, and say what the next session covers.');
+  send(lines.join('\n'), 'session-done');
+  const b = document.getElementById('donebtn');
+  b.disabled = true; b.textContent = 'Sent — Claude is grading…';
+  document.getElementById('donenote').textContent = '';
+});
+
+// --- chat
+function pushChat(){
+  const el = document.getElementById('chatinput');
+  const t = el.value.trim(); if(!t) return;
+  send(t, 'chat'); el.value = '';
+}
+document.getElementById('chatsend').addEventListener('click', pushChat);
+document.getElementById('chatinput').addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.shiftKey){e.preventDefault(); pushChat();}
+});
+
+// --- poll chat.jsonl
+let lastLen = 0;
+async function poll(){
+  try{
+    const r = await fetch('/chat.jsonl', {cache:'no-store'});
+    if(!r.ok) return;
+    const txt = await r.text();
+    if(txt.length === lastLen) return;
+    lastLen = txt.length;
+    const log = document.getElementById('chatlog');
+    log.innerHTML = '';
+    for(const line of txt.split('\n')){
+      if(!line.trim()) continue;
+      let m; try{m = JSON.parse(line);}catch(e){continue;}
+      if(m.tag === 'session-done') { // show as compact marker
+        const d = document.createElement('div');
+        d.className = 'msg user'; d.textContent = '📤 answers submitted';
+        log.appendChild(d); continue;
+      }
+      const d = document.createElement('div');
+      d.className = 'msg ' + (m.role === 'user' ? 'user' : 'coach');
+      d.textContent = m.text;
+      log.appendChild(d);
+    }
+    log.scrollTop = log.scrollHeight;
+  }catch(e){}
+}
+setInterval(poll, 3000); poll();
+</script>
+</body>
+</html>
