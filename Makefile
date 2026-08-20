@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index board clean
+.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask board clean
 .DEFAULT_GOAL := help
 
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
 	@echo "make compare two whole architectures end to end, five-stage split for both (VOX-013)"
 	@echo "make index   extract the sources/ PDFs to text chunks and print the counts (VOX-029)"
+	@echo "make ask     Q=\"...\" retrieve the top chunks for a question, with file:page (VOX-030)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 
 OLLAMA_MODEL := hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
@@ -97,6 +98,18 @@ compare:
 # so a clean clone has nothing to index until someone puts the corpus there.
 index:
 	uv run python scripts/build_index.py
+
+# VOX-030. BM25 over runs/chunks.jsonl: the top 5 chunks for Q, each with doc:page, chunk_idx and
+# score, or "not in the documents" when the best score does not clear config.RETRIEVAL_SCORE_FLOOR.
+# Needs `make index` to have run. No model, no network, no key — this stage writes no cost log line
+# because there is no provider to name.
+#
+#   make ask Q="how many casual leaves am I entitled to in a year"
+#
+# `--calibrate` instead of a Q re-measures the floor over evals/dev/retrieval_floor_queries.json.
+ask:
+	@test -n "$(Q)" || { echo 'usage: make ask Q="how many casual leaves do I get"'; exit 1; }
+	uv run python scripts/ask.py "$(Q)"
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.

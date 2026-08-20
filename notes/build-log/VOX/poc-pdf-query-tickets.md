@@ -45,11 +45,15 @@ and it must be visible at load, not at query time.
 
     Estimate: 1.5h   Depends: VOX-029   Phase: POC   Day: 2026-08-21
 
-`retrieve(query, k=3)` returns chunks ranked by term overlap, each with its score and `file:page`.
+`retrieve(query, k=5)` returns chunks ranked by BM25, each with its score and `file:page`.
 No model, no network, no key. A floor below which nothing is returned, so "not in the documents" is
 a real answer state and not an empty string.
 
-    Done when: `make ask Q="..."` prints the top 3 chunks with file:page and score, and prints
+k is 5, not the 3 drafted here: the board's own text for VOX-030 (task 1768) says "top-k chunks
+(default k=5)", and the board is the source of truth. VOX-031's prompt budget is what pays for the
+extra two chunks, so if it turns out not to fit, that is where the number moves.
+
+    Done when: `make ask Q="..."` prints the top 5 chunks with file:page and score, and prints
                nothing-found for a query about something absent from the corpus.
     Verification: two `make ask` runs - one hit, one miss.
 

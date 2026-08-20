@@ -339,6 +339,46 @@ CHUNK_OVERLAP_TOKENS = int(os.environ.get("VOX_CHUNK_OVERLAP_TOKENS", "50"))
 # other model here; it is a tokenizer, so it is never called and costs nothing.
 TOKENIZER_REPO = os.environ.get("VOX_TOKENIZER_REPO", "NousResearch/Meta-Llama-3.1-8B-Instruct")
 
+# --- retrieval (VOX-030) -----------------------------------------------------------------------
+# How many chunks a query gets back. The ticket's number. Five 300-token chunks is ~1500 tokens of
+# context, which is what VOX-031's answer prompt has to fit around — so if this rises, that prompt
+# budget is the thing that pays for it.
+RETRIEVAL_TOP_K = int(os.environ.get("VOX_RETRIEVAL_TOP_K", "5"))
+
+# The score below which nothing is returned, so "that is not in these documents" is a real answer
+# state rather than an empty string. src/retrieval.py divides the raw BM25 sum by the query's own
+# ceiling, so the number is a fraction of the query's information content and is comparable between
+# a three-word question and a ten-word one. It is still corpus-specific: change the corpus, the chunk
+# geometry or the stopword list and re-measure with `uv run python scripts/ask.py --calibrate`.
+#
+# MEASURED, 2026-08-20, 215 chunks over 15 documents, 13 dev queries (7 answerable, 6 deliberately
+# absent) in evals/dev/retrieval_floor_queries.json:
+#
+#     answerable  min 0.320  max 0.615
+#     absent      min 0.126  max 0.234
+#
+# Separable — every answerable query outscored every absent one, and top-1 landed in a document
+# that answers the question on 7 of 7. 0.28 is the midpoint of the [0.234, 0.320] gap, a margin of
+# ~0.04 on the tight side. It is a 13-query dev measurement, so it is a starting point and not a
+# settled number; VOX-033's gate is what tests it at scale.
+#
+# The first attempt used raw BM25 and was NOT separable (an absent query scored 9.64 against a
+# weakest answerable 7.38) — that failure is why the score is normalised at all.
+RETRIEVAL_SCORE_FLOOR = float(os.environ.get("VOX_RETRIEVAL_SCORE_FLOOR", "0.28"))
+
+# Okapi BM25's own two knobs, at rank_bm25's defaults. k1 is how fast term frequency saturates; b is
+# how hard a long chunk is penalised for being long. Surfaced here for the same reason CHUNK_TOKENS
+# is: retrieval quality is what decides whether the defaults were right for a corpus of short policy
+# pages, and that measurement is VOX-033's gate, not something this ticket settled.
+BM25_K1 = float(os.environ.get("VOX_BM25_K1", "1.5"))
+BM25_B = float(os.environ.get("VOX_BM25_B", "0.75"))
+
+# BM25Okapi floors the IDF of a term appearing in over half the corpus at epsilon * average_idf — a
+# positive number, so an ultra-common term still adds score. That inflates every score including a
+# miss's, which is exactly what the floor above has to see through. src/retrieval.py's stopword list
+# is the first defence; this is the dial if it is not enough.
+BM25_EPSILON = float(os.environ.get("VOX_BM25_EPSILON", "0.25"))
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "

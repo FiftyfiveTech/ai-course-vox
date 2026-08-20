@@ -99,8 +99,12 @@ empty answer later.
 
 `sources/` and the chunk file are gitignored — the corpus is internal company documentation, and
 the extracted text is the same disclosure as the PDFs. A clean clone has nothing to index until
-someone puts documents there. Retrieval over the chunks is VOX-030; the grounded answer is
-VOX-031. Details and the measured counts: the source-folder section of `ARCHITECTURE.md`.
+someone puts documents there.
+
+`make ask Q="..."` retrieves over those chunks: BM25, the top 5 with `doc_id:page`, `chunk_idx` and
+a score, or **"not in the documents"** when the best score does not clear the measured floor. Still
+no network, no model call, no key. The grounded answer on top of it is VOX-031. Details and the
+measured numbers: the source-folder and retrieval sections of `ARCHITECTURE.md`.
 
 ## Rules that live in this repo
 

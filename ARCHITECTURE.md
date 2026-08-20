@@ -305,8 +305,9 @@ src/
   tts.py           — TTS backends: kokoro, speecht5, piper
   harness.py       — one chained turn driven from a recording, shared by
                      scripts/turn_from_fixture.py and scripts/compare_arms.py
-  sources.py       — PDF corpus -> text chunks with (doc_id, page) provenance (VOX-029);
-                     retrieval over those chunks lands in VOX-030
+  sources.py       — PDF corpus -> text chunks with (doc_id, page) provenance (VOX-029)
+  retrieval.py     — BM25 over those chunks; top-k with provenance and a score floor (VOX-030).
+                     The one stage with no provider, so the only one that writes no cost log line
 
 sources/           — the PDF corpus. Gitignored: internal HR policies (see below)
 
@@ -497,7 +498,7 @@ Reading caveats, both of which are in the script rather than left to the reader:
 
 A folder of PDFs in, one JSON lines file of chunks out — `make index`, no network, no model call,
 no key. `pypdf` parses; the tokenizer only counts. This is the front half of the PDF-question POC
-(VOX-029 -> 030 -> 031 -> 032 -> 033); retrieval and the grounded answer come next.
+(VOX-029 -> 030 -> 031 -> 032 -> 033); the grounded answer comes next.
 
 ```
 sources/*.pdf  ──pypdf──>  text per page  ──300-token window, 50 overlap──>  runs/chunks.jsonl
@@ -547,6 +548,66 @@ Two facts checked rather than assumed, because both are claims the chunker makes
 output: all 215 chunks are verbatim substrings of the page they came from (the decode round-trip
 is lossless), and the shared text between consecutive chunks on a page re-tokenizes to 49-52
 tokens, mean 50, never 0.
+
+---
+
+## Lexical retrieval (POC, VOX-030)
+
+Question in, top 5 chunks out with the provenance VOX-029 wrote — `make ask Q="..."`. Okapi BM25
+via `rank_bm25`, no embeddings, no model, no network, no key.
+
+```
+query ──stopwords──> terms ──BM25 over 215 chunks──> ÷ query ceiling ──> score in [0,1)
+                                                                            │
+                                              score > RETRIEVAL_SCORE_FLOOR ┤──> top 5 hits
+                                                                            └──> [] "not in the documents"
+```
+
+**This is the only stage in the pipeline that writes no line to `runs/calls.jsonl`.** Not an
+exception to "every model call goes through the cost logger" — there is no model and no provider,
+`telemetry.log_call` would fail its own `FREE_TIERS` check, and a `cost_usd: 0.0` row against a
+provider that does not exist would be a lie in the ledger. Retrieval still costs time, and
+`t_retrieval_ms` goes on the *turn* record in VOX-032. Measured here: **0.6-0.7 ms** per query
+over 215 chunks, against a 23-28 ms one-off index build at startup.
+
+**The score is BM25 divided by the query's own ceiling**, i.e. by the score a chunk containing
+every query term to saturation would get. Raw BM25 is a *sum* over query terms, so it grows with
+query length, and the first attempt at a floor failed on exactly that: the absent question "is
+there a canteen subsidy for lunch on working days" scored **9.64** raw while the answerable "am I
+responsible for the laptop assigned to me" scored **7.38**. No threshold separates those. After
+normalising, the same two are 0.232 and 0.320. Dividing by a per-query constant leaves the ranking
+untouched — it only makes the *threshold* mean the same thing for a three-word question and a
+ten-word one.
+
+A query term the corpus has never seen is charged at the IDF of a term appearing in exactly one
+chunk, so it counts in full in the denominator and not at all in the numerator. BM25 treats an
+out-of-vocabulary term as zero-information, which is backwards here: "sabbatical" and "canteen"
+are the entire reason those questions are unanswerable.
+
+**The stopword list in `src/retrieval.py` is load-bearing, not hygiene.** `BM25Okapi` floors the
+IDF of a term appearing in over half the corpus at `epsilon * average_idf` — positive, not zero —
+so without dropping function words, "what is the policy on ..." scores every chunk in the corpus
+and no floor can separate anything.
+
+### Measured, `scripts/ask.py --calibrate`, 2026-08-20
+
+215 chunks over 15 documents; 13 dev queries in `evals/dev/retrieval_floor_queries.json`, 7
+answerable and 6 deliberately absent. The absent ones are written HR-shaped and share vocabulary
+with the corpus — a miss phrased in unrelated words would clear any floor and prove nothing.
+
+| | top-1 score, min | max |
+|---|---|---|
+| answerable (7) | **0.320** | 0.615 |
+| absent from the corpus (6) | 0.126 | **0.234** |
+
+Separable: every answerable query outscored every absent one. `RETRIEVAL_SCORE_FLOOR = 0.28`, the
+midpoint of the [0.234, 0.320] gap — a margin of ~0.04 on the tight side. Top-1 landed in a
+document that answers the question on **7 of 7**.
+
+Two limits stated rather than glossed. It is a **13-query dev measurement**: a starting point, and
+VOX-033's gate over a written query set is what tests it at scale. And it has **no held-out
+number** — `heldout-v1` is sealed and contains zero document queries (its categories are greet /
+entity / ambig / escalate / refuse), and it is not reopened for this.
 
 ---
 

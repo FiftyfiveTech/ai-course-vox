@@ -31,6 +31,10 @@ dependencies = [
     # embedding out of a dataset repo's zip, and an undeclared transitive dep is a trap.
     "huggingface-hub>=0.23",
     "pypdf>=6.16.1",
+    # VOX-030's Okapi BM25 scorer. Pure Python over the numpy above, so retrieval has no network at
+    # query time; a scorer and not a model, so the HF-repo-id rule does not apply to it any more
+    # than it does to pypdf.
+    "rank-bm25>=0.2.2",
 ]
 
 [dependency-groups]

@@ -6,7 +6,7 @@ work because `telemetry._append` looks the path up at call time — see the comm
 """
 import pytest
 
-from src import config, cooldown, telemetry
+from src import config, cooldown, retrieval, sources, telemetry
 
 
 @pytest.fixture(autouse=True)
@@ -43,3 +43,19 @@ def no_env_override(monkeypatch):
     """A VOX_*_MODEL left in the shell must not change what the default-resolution tests see."""
     for env in config.STAGE_ENV.values():
         monkeypatch.delenv(env, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def chunks_file(tmp_path, monkeypatch):
+    """Never read the real runs/chunks.jsonl from a test.
+
+    Autouse for the same reason the log redirects are, in the other direction: `retrieval.retrieve()`
+    with no index falls back to config.CHUNKS_FILE, and on this machine that file has a real 215-chunk
+    corpus in it. A test that forgot to pass its own index would not fail — it would pass, here, and
+    only here. Pointed at a path that does not exist, so the fallback raises instead.
+    """
+    path = tmp_path / "chunks.jsonl"
+    monkeypatch.setattr(config, "CHUNKS_FILE", path)
+    monkeypatch.setattr(sources, "CHUNKS_FILE", path)
+    monkeypatch.setattr(retrieval, "_INDEX", None)
+    return path
