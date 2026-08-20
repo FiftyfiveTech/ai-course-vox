@@ -16,24 +16,50 @@ import httpx
 from src import errors
 from src.config import PROMPTS_DIR
 
-PROMPT_FILE = PROMPTS_DIR / "reply_v1.md"
-
 # A spoken turn is short; this is a guardrail, not a target. Held equal across arms so a latency
 # comparison is not really a comparison of how much each arm was allowed to say.
 MAX_TOKENS = 120
 TEMPERATURE = 0.3
 
+# Prompt library (VOX-018). One versioned file per intent stage — none inlined in code.
+# Keys match the intent labels in ENTITY_SPEC.md; "reply" is the Phase-0 fallback.
+PROMPT_FILES = {
+    "greet":    PROMPTS_DIR / "greet_v1.md",
+    "clarify":  PROMPTS_DIR / "clarify_v1.md",
+    "confirm":  PROMPTS_DIR / "confirm_v1.md",
+    "capture":  PROMPTS_DIR / "capture_v1.md",
+    "escalate": PROMPTS_DIR / "escalate_v1.md",
+    "refuse":   PROMPTS_DIR / "refuse_v1.md",
+    "reply":    PROMPTS_DIR / "reply_v1.md",   # Phase-0 generic fallback
+}
 
-def system_prompt():
-    """The versioned prompt file with its YAML front matter stripped. Never inlined in code."""
-    text = PROMPT_FILE.read_text(encoding="utf-8")
+# Default: the generic reply prompt keeps Phase-0 behaviour unchanged.
+_DEFAULT_STAGE = "reply"
+
+
+def load_prompt(stage=None):
+    """Load a versioned prompt file and strip its YAML front matter.
+
+    Args:
+        stage: one of the keys in PROMPT_FILES, or None for the default.
+    Returns the system prompt string ready to pass to the LLM.
+    """
+    key = stage if stage in PROMPT_FILES else _DEFAULT_STAGE
+    path = PROMPT_FILES[key]
+    text = path.read_text(encoding="utf-8")
     return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
 
 
-def messages(transcript):
-    """-> the `msgs` list for arms.llm(). The only place a turn's prompt shape is decided."""
+def messages(transcript, stage=None):
+    """-> the `msgs` list for arms.llm(). The only place a turn's prompt shape is decided.
+
+    Args:
+        transcript: the user's spoken text.
+        stage: prompt stage to use (greet, clarify, confirm, capture, escalate, refuse).
+               None falls back to the generic reply prompt.
+    """
     return [
-        {"role": "system", "content": system_prompt()},
+        {"role": "system", "content": load_prompt(stage)},
         {"role": "user", "content": transcript},
     ]
 
@@ -83,8 +109,18 @@ BACKENDS = {"openai-chat": openai_chat}
 LOADERS = {}          # both arms are hosted; there is nothing to warm
 
 
-def reply(transcript, turn_id, model_id=None):
-    """-> one short reply suitable for reading aloud, from the named arm or the default."""
+def reply(transcript, turn_id, model_id=None, stage=None):
+    """-> one short reply suitable for reading aloud, from the named arm or the default.
+
+    Args:
+        transcript: the user's spoken text.
+        turn_id: telemetry join key.
+        model_id: HF repo id of the LLM arm, or None for the default.
+        stage: prompt stage (greet, clarify, confirm, capture, escalate, refuse).
+               None uses the generic reply prompt.
+    """
     from src import arms                      # imported here: arms imports this module for BACKENDS
-    return arms.llm(messages(transcript), model_id, turn_id=turn_id,
-                    prompt_file=PROMPT_FILE.name, transcript_chars=len(transcript))
+    prompt_key = stage if stage in PROMPT_FILES else _DEFAULT_STAGE
+    return arms.llm(messages(transcript, stage), model_id, turn_id=turn_id,
+                    prompt_file=PROMPT_FILES[prompt_key].name,
+                    transcript_chars=len(transcript))
