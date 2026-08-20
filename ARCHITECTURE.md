@@ -206,10 +206,53 @@ Barge-in = user speaks while TTS is still playing.
 - VAD runs continuously, not only after TTS finishes.
 - When VAD detects speech during TTS playback, TTS is **immediately interrupted**.
 - The new utterance is queued and processed as the next turn.
-- Implementation: the TTS playback thread is killed; VAD segment is handed off to the turn loop.
 
 Barge-in interrupt point: **between TTS playback start and TTS playback end**.
 No partial transcriptions are discarded; the full new utterance is captured before STT runs.
+
+### How it is actually built (VOX-011)
+
+The draft said *"the TTS playback thread is killed"*. Nothing is killed, and no thread is started:
+playback already runs on the output device's own callback thread, so the mic loop keeps the main
+thread and `Playback.abort()` stops the device from being handed any more samples. `abort()` and not
+`stop()` — stop drains the buffer first, which is the opposite of interrupting.
+
+There is also no second listener. The ordinary endpointer runs across the whole reply and past it,
+so the utterance that interrupts a reply is captured by the same `listen()` call that was watching
+for it, and is handed to the next turn as its input. An interruption and a polite next utterance are
+therefore the same code path; they differ only in whether anything was still playing when the speech
+arrived, which is what `abort()` returning `None` reports.
+
+Two streams, not one duplex stream: the mic is 16 kHz for silero and whisper, Kokoro emits 24 kHz,
+and a duplex stream takes a single sample rate — so one stream would mean resampling the reply to
+match the microphone. Confirmed working on this machine before anything was written.
+
+**Two knobs, both PROVISIONAL until VOX-012 tunes them on the dev set:**
+
+| | | why it exists |
+|---|---|---|
+| `BARGE_MIN_SPEECH_MS` | 200 | speech that must accumulate before a reply is cut. Cutting on the first speech frame is faster and lets a cough kill every reply |
+| `BARGE_SPEECH_THRESHOLD` | 0.7 | stricter than `VAD_SPEECH_THRESHOLD`, because this decision fires while the speaker is running |
+
+Stop latency is measured **from the first speech frame**, not from the moment the decision was made,
+so `BARGE_MIN_SPEECH_MS` is visible inside the printed number instead of hidden behind it.
+
+**No acoustic echo cancellation, and none is in scope.** On open speakers silero hears Kokoro and
+the reply interrupts itself, every time. The threshold and the confirmation window reduce how often
+that happens; neither fixes it, and no value fixes it, because speaker bleed is real speech as far as
+a VAD is concerned. Real AEC means a webrtc/speexdsp dependency and a separate ticket. **The demo
+machine runs on headphones**, and VOX-026's dry-run has to be done on the demo hardware for exactly
+this reason.
+
+What `abort()` cannot recall is the output device's own buffer — 0.182 s on this machine's MME
+device, which is larger than the stop latency itself. So the printed number is when VOX stopped
+*sending*, and `out_latency_s` is logged beside it as the tail that can still be heard.
+
+Barge-in needs a turn after the one being interrupted, so `--turns 2` or more switches it on. The
+last turn of a run is played blocking, which keeps `make demo`'s default single turn exactly as
+VOX-002 and VOX-003 measured it. One consequence worth knowing when reading the logs: a watched
+turn's record closes only once the *next* utterance has been endpointed, because one listener spans
+both — so its `ts` and its printed latency line land after the user has spoken again.
 
 ---
 

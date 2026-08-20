@@ -274,7 +274,7 @@ def test_a_rate_limit_never_retries_the_same_arm(monkeypatch, capsys):
         "stt": remote, "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]})
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: _capture())
     monkeypatch.setattr(loop.nlu, "reply", lambda *a, **kw: "On the fourth.")
-    monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: None)
+    silent_speaker(monkeypatch)
     posts = serve(monkeypatch, stt, rate_limited())
     local_stt(monkeypatch, "when was I paid")
     working_tts(monkeypatch)
@@ -330,6 +330,30 @@ def working_tts(monkeypatch):
                         lambda arm, text, rec: [0.0] * 240)
 
 
+class FakePlayback:
+    """What audio.play hands back with block=False. Silent, and never interrupted.
+
+    Needed because every turn but the last of a multi-turn run plays its reply interruptibly
+    (VOX-011), and the loop closes the handle it was given. Returning None is enough only for a
+    single-turn run, where playback still blocks.
+    """
+
+    reply_s = 1.0
+    played_s = 0.0
+
+    def close(self):
+        pass
+
+
+def silent_speaker(monkeypatch):
+    """A speaker that makes no sound, whether the turn plays blocking or watched."""
+    monkeypatch.setattr(loop.audio, "play",
+                        lambda audio, **kw: FakePlayback() if kw.get("block") is False else None)
+
+
 def _capture():
+    # `__len__` because the real Capture has one and the loop prints it when a capture is carried
+    # from one turn into the next (VOX-011).
     return type("Cap", (), {"segment": [0.0] * 16, "speech_end_t": 100.0, "endpointed_t": 100.4,
-                            "spoken_s": 1.2, "infer_ms": 9.0, "t_vad_ms": 400.0})()
+                            "spoken_s": 1.2, "infer_ms": 9.0, "t_vad_ms": 400.0,
+                            "__len__": lambda self: len(self.segment)})()

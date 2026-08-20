@@ -8,6 +8,11 @@ time and knows nothing about microphones, so the same logic that runs live can b
 recording — which is how it gets tested without a person in the room. `listen()` is the only
 part that touches the mic, and it stays the loop's single entry point.
 
+That one entry point is also what makes barge-in cheap (VOX-011). `listen()` runs across a reply and
+past it, reporting speech through `on_speech` as soon as there is enough of it to act on, so the
+utterance that interrupted a reply is captured here like any other and there is no second listener to
+keep in step with this one.
+
 Not logged through telemetry.log_call: silero runs locally per frame, so a record per inference
 would be thousands of lines a turn. VOX-003 times this stage as t_vad at the turn level, from
 the marks `Capture` carries out of here.
@@ -20,8 +25,8 @@ import sounddevice as sd
 import torch
 from silero_vad import load_silero_vad
 
-from src.config import (SAMPLE_RATE, VAD_FRAME, VAD_MAX_UTTERANCE_MS, VAD_MIN_SPEECH_MS,
-                        VAD_SILENCE_MS, VAD_SPEECH_THRESHOLD)
+from src.config import (BARGE_MIN_SPEECH_MS, SAMPLE_RATE, VAD_FRAME, VAD_MAX_UTTERANCE_MS,
+                        VAD_MIN_SPEECH_MS, VAD_SILENCE_MS, VAD_SPEECH_THRESHOLD)
 
 MS_PER_FRAME = VAD_FRAME / SAMPLE_RATE * 1000  # 32 ms
 
@@ -73,11 +78,17 @@ class Capture:
 
 
 class Endpointer:
-    """Frame-by-frame end-of-utterance detection. One instance per turn."""
+    """Frame-by-frame end-of-utterance detection. One instance per turn.
 
-    def __init__(self, model=None):
+    `threshold` overrides VAD_SPEECH_THRESHOLD for this instance. Barge-in wants a stricter one
+    than ordinary endpointing does (see BARGE_SPEECH_THRESHOLD), and a module-level constant read
+    directly could not differ between the two.
+    """
+
+    def __init__(self, model=None, threshold=None):
         self.model = model or _vad_model()
         self.model.reset_states()
+        self.threshold = VAD_SPEECH_THRESHOLD if threshold is None else threshold
         self._reset()
         self.waited_ms = 0.0
         self.infer_ms = 0.0
@@ -87,8 +98,14 @@ class Endpointer:
         self.speech_frames = 0
         self.silence_ms = 0.0
         self.started = False
+        self.first_speech_t = None
         self.last_speech_t = None
         self.done_t = None
+
+    @property
+    def speech_ms(self):
+        """How much speech is in the utterance so far. Cleared with everything else on a rearm."""
+        return self.speech_frames * MS_PER_FRAME
 
     def push(self, frame):
         """Feed exactly VAD_FRAME samples of float32 mono at 16 kHz. -> one of the states above."""
@@ -99,7 +116,7 @@ class Endpointer:
         prob = self.model(torch.from_numpy(frame), SAMPLE_RATE).item()
         now = time.perf_counter()
         self.infer_ms += (now - t0) * 1000
-        is_speech = prob >= VAD_SPEECH_THRESHOLD
+        is_speech = prob >= self.threshold
 
         if not self.started:
             self.waited_ms += MS_PER_FRAME
@@ -108,6 +125,9 @@ class Endpointer:
             self.started = True
             self.frames.append(frame)
             self.speech_frames = 1
+            # The mark barge-in stop latency is measured from: the user has been talking since
+            # here, whatever a caller later decides is enough speech to act on.
+            self.first_speech_t = now
             self.last_speech_t = now
             return SPEAKING
 
@@ -120,7 +140,7 @@ class Endpointer:
             self.silence_ms += MS_PER_FRAME
 
         if self.silence_ms >= VAD_SILENCE_MS:
-            if self.speech_frames * MS_PER_FRAME >= VAD_MIN_SPEECH_MS:
+            if self.speech_ms >= VAD_MIN_SPEECH_MS:
                 self.done_t = now
                 return DONE
             # Too short to be a turn — a cough or a door. Rearm rather than transcribe it.
@@ -136,7 +156,7 @@ class Endpointer:
 
     def flush(self):
         """End the utterance at end-of-audio. -> DONE if enough speech was collected."""
-        if self.started and self.speech_frames * MS_PER_FRAME >= VAD_MIN_SPEECH_MS:
+        if self.started and self.speech_ms >= VAD_MIN_SPEECH_MS:
             self.done_t = time.perf_counter()
             return DONE
         return WAITING
@@ -148,7 +168,7 @@ class Endpointer:
         return np.concatenate(self.frames)
 
     def spoken_s(self):
-        return self.speech_frames * MS_PER_FRAME / 1000
+        return self.speech_ms / 1000
 
     def capture(self):
         """The finished utterance with its timing marks. Call once push() returned DONE."""
@@ -156,18 +176,31 @@ class Endpointer:
                        self.spoken_s(), round(self.infer_ms, 1))
 
 
-def listen(max_wait_s=30):
+def listen(max_wait_s=30, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None,
+           announce=True):
     """Block until the user speaks and stops. -> Capture, or None.
 
     Returns None if nothing was said within max_wait_s, so the caller can exit cleanly instead
     of hanging on a muted mic.
+
+    `on_speech(first_speech_t)` is called once per utterance, as soon as `confirm_ms` of speech has
+    accumulated, and is handed the moment speech *started* rather than the moment it was confirmed —
+    a caller measuring a reaction has to measure it from when the user began, not from when this
+    function became sure. It fires and then endpointing carries on unchanged, which is what makes
+    barge-in cheap: the utterance that interrupted a reply is captured by this same call, so it needs
+    no second listener and no separate capture path (VOX-011).
+
+    A rearm after TOO_SHORT clears the mark, so a cough that never reaches `confirm_ms` does not
+    fire the hook and the real utterance behind it still can.
     """
-    ep = Endpointer()
+    ep = Endpointer(threshold=threshold)
     max_wait_ms = max_wait_s * 1000
+    fired = False        # on_speech is once per utterance, not once per frame above the threshold
 
     with sd.InputStream(channels=1, samplerate=SAMPLE_RATE, dtype="float32",
                         blocksize=VAD_FRAME) as stream:
-        print("listening… speak now.", flush=True)
+        if announce:
+            print("listening… speak now.", flush=True)
         while True:
             block, overflowed = stream.read(VAD_FRAME)
             if overflowed:
@@ -176,6 +209,7 @@ def listen(max_wait_s=30):
 
             state = ep.push(block[:, 0].copy())
             if state == SPEAKING and len(ep.frames) == 1:
+                fired = False                 # a new utterance after a rearm gets its own hook call
                 print("  speech detected…", flush=True)
             elif state == TOO_SHORT:
                 print("  (too short — still listening)", flush=True)
@@ -183,6 +217,10 @@ def listen(max_wait_s=30):
                 break
             elif state == WAITING and ep.waited_ms >= max_wait_ms:
                 return None
+
+            if on_speech is not None and not fired and ep.speech_ms >= confirm_ms:
+                fired = True
+                on_speech(ep.first_speech_t)
 
     cap = ep.capture()
     print(f"  endpointed: {len(cap) / SAMPLE_RATE:.2f}s of audio "

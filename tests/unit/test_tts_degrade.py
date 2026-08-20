@@ -72,10 +72,11 @@ def working_tts(monkeypatch):
 def test_a_tts_failure_degrades_to_text_and_keeps_the_session(turn, monkeypatch, capsys):
     break_tts(monkeypatch)
 
-    spoken, keep_going = loop.one_turn(DEFAULTS)
+    result = loop.one_turn(DEFAULTS)
 
-    assert spoken is False, "nothing reached the speaker, so the turn was not spoken"
-    assert keep_going is True, "a broken voice is no reason to end the conversation"
+    assert result.spoken is False, "nothing reached the speaker, so the turn was not spoken"
+    assert result.keep_going is True, "a broken voice is no reason to end the conversation"
+    assert result.pending is None, "nothing played, so there was nothing to be interrupted"
 
 
 def test_the_degrade_is_loud_and_carries_the_reply(turn, monkeypatch, capsys):
@@ -144,10 +145,10 @@ def test_a_successful_turn_carries_no_degrade_marker(turn, monkeypatch, turns_lo
     """Without this, every test above would pass against a loop that degrades unconditionally."""
     working_tts(monkeypatch)
 
-    spoken, keep_going = loop.one_turn(DEFAULTS)
+    result = loop.one_turn(DEFAULTS)
     rec = json.loads(turns_log.read_text(encoding="utf-8").strip())
 
-    assert (spoken, keep_going) == (True, True)
+    assert (result.spoken, result.keep_going) == (True, True)
     assert "degraded" not in rec
     assert "TTS FAILED" not in capsys.readouterr().err
     assert len(turn) == 1, "a working turn plays exactly once"
@@ -162,9 +163,9 @@ def test_a_tts_failure_does_not_stop_a_multi_turn_run(turn, monkeypatch, capsys)
     states = iter([break_tts, working_tts])
     real_one_turn = loop.one_turn
 
-    def one_turn(chosen):
+    def one_turn(chosen, **kw):
         next(states)(monkeypatch)
-        return real_one_turn(chosen)
+        return real_one_turn(chosen, **kw)
 
     monkeypatch.setattr(loop, "one_turn", one_turn)
 

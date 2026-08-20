@@ -265,6 +265,27 @@ VAD_MAX_UTTERANCE_MS = 15_000  # hard stop so a stuck mic cannot hang the loop
 # trailing silence on every turn, which lands in time_to_first_audio when VOX-003 measures it.
 VAD_SILENCE_MS = 1_100
 
+# --- barge-in (VOX-011; VOX-012 lifts these into the same config file) -----------------------
+# The endpointer decides where a turn *ends*. These two decide when a reply gets *cut*, which is a
+# different trade: endpointing may take a second to be sure, and barge-in may not.
+#
+# PROVISIONAL — neither is measured on VOX-004's 45 utterances yet, and VOX-012 must re-tune both
+# and print the numbers it chose.
+#
+# How much speech has to accumulate before the reply is stopped. Cutting on the very first speech
+# frame would give the fastest possible stop and would also let a cough, a chair or a door kill
+# every reply. This is that trade, made explicitly: the stop latency printed on the turn record is
+# measured from the *first* speech frame, so whatever is set here is visible in the number rather
+# than hidden inside it.
+BARGE_MIN_SPEECH_MS = 200
+
+# Higher than VAD_SPEECH_THRESHOLD on purpose, and for one reason only: there is no acoustic echo
+# cancellation in this pipeline. On open speakers silero hears Kokoro and the reply interrupts
+# itself. A stricter threshold reduces how often that happens; it does not fix it, and no value here
+# fixes it, because speaker bleed is real speech as far as a VAD is concerned. The demo machine runs
+# on headphones — see notes/ and ARCHITECTURE.md.
+BARGE_SPEECH_THRESHOLD = 0.7
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "
