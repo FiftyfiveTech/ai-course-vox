@@ -42,7 +42,8 @@ def one_turn(chosen):
         turn.vad(cap)
 
         with turn.stage("stt"):
-            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id)
+            transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id,
+                                  on_fallback=turn.fallback)
         print(f"you said : {transcript!r}")
         if not transcript:
             # Whisper returning empty on real audio is a provider problem, not a quiet user.
@@ -50,12 +51,14 @@ def one_turn(chosen):
             return False, False
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id)
+            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
+                               on_fallback=turn.fallback)
         print(f"vox says : {answer!r}")
 
         try:
             with turn.stage("tts"):
-                speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id)
+                speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id,
+                                  on_fallback=turn.fallback)
         except Exception as e:
             # The reply is fine; only the voice failed. Losing the whole turn over that throws away
             # work the user waited for, so degrade to text — but loudly, on stderr and on the turn
@@ -80,8 +83,12 @@ def report(rec):
         v = rec.get(key)
         return f"{v:.0f}ms" if v is not None else "n/a"
 
-    return (f"vad {ms('t_vad_ms')} + stt {ms('t_stt_ms')} + llm {ms('t_llm_ms')} + "
+    line = (f"vad {ms('t_vad_ms')} + stt {ms('t_stt_ms')} + llm {ms('t_llm_ms')} + "
             f"tts {ms('t_tts_ms')}  ->  time_to_first_audio {ms('time_to_first_audio_ms')}")
+    # A turn that fell back is not comparable to one that did not, so the human-readable line says
+    # so too rather than leaving it only in the JSONL.
+    fell_back = rec.get("fell_back")
+    return line + (f"   [fell back: {', '.join(fell_back)}]" if fell_back else "")
 
 
 def main():
@@ -98,8 +105,7 @@ def main():
     print("resolving arms and loading local models…", flush=True)
     vad._vad_model()
     chosen = arms.select(args)
-    for stage, arm in chosen.items():
-        print(f"  {stage:<4} {arm.repo_id}  ({arm.provider}, {arm.backend})")
+    print(arms.describe(chosen))
 
     print(f"\n{CONSENT_NOTICE}\n")
 

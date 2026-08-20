@@ -23,7 +23,10 @@ CALLS_LOG = RUNS_DIR / "calls.jsonl"
 TURNS_LOG = RUNS_DIR / "turns.jsonl"
 
 # Free-tier endpoints and local weights. Anything not on this list is a STOP-and-ask.
-FREE_TIERS = {"groq": "free-tier", "nvidia-nim": "free-tier", "local": "local-weights"}
+# ollama is "local-weights" like `local` is: the weights are on this machine and no one is billed.
+# It has a name of its own only because it is reached over HTTP rather than loaded in-process.
+FREE_TIERS = {"groq": "free-tier", "nvidia-nim": "free-tier", "local": "local-weights",
+              "ollama": "local-weights"}
 
 
 def new_turn_id():
@@ -116,6 +119,25 @@ class TurnTimer:
             if stage not in self.ms:
                 raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
             self.extra[f"{stage}_model"] = arm.id if hasattr(arm, "id") else arm
+
+    def fallback(self, stage, from_arm, to_arm, reason, failed_ms=None):
+        """A stage did not run on the arm this turn was started with. Rewrite the record to say so.
+
+        `arms()` stamps `<stage>_model` before the turn begins, from what was *selected*. After a
+        fallback that field would name an arm that never ran, and VOX-013's per-turn comparison
+        reads exactly that field — so the wrong model would get the credit for the latency.
+
+        `<stage>_failed_ms` is the other half. `t_<stage>_ms` now spans the dead remote round-trip
+        plus the local call, which is honest about what the user waited for but would otherwise
+        attribute a provider timeout to local inference. The breakdown keeps both readable.
+        """
+        if stage not in self.ms:
+            raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
+        self.extra[f"{stage}_model"] = to_arm.id
+        self.extra[f"{stage}_fallback_from"] = from_arm.id
+        self.extra[f"{stage}_fallback_reason"] = reason
+        self.extra[f"{stage}_failed_ms"] = failed_ms
+        self.extra.setdefault("fell_back", []).append(stage)
 
     def vad(self, capture):
         """Adopt the endpointer's marks: t_vad, and the origin the whole turn is measured from."""

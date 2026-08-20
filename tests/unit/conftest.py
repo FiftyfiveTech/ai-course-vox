@@ -6,7 +6,7 @@ work because `telemetry._append` looks the path up at call time — see the comm
 """
 import pytest
 
-from src import config, telemetry
+from src import config, cooldown, telemetry
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +23,19 @@ def turns_log(tmp_path, monkeypatch):
     path = tmp_path / "turns.jsonl"
     monkeypatch.setattr(telemetry, "TURNS_LOG", path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_cooldowns():
+    """A 429 in one test must not leave an arm parked for the next.
+
+    Autouse for the same reason the log redirects are: the registry is process-global, so a test
+    that forgets to clear it does not fail — it silently makes a *later* test skip the remote arm
+    and pass for the wrong reason. Cleared on the way in and the way out.
+    """
+    cooldown.clear()
+    yield
+    cooldown.clear()
 
 
 @pytest.fixture(autouse=True)
