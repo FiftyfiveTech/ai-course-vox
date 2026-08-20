@@ -296,8 +296,8 @@ src/
                      one place the fallback rule is written
   vad.py           — endpointing via snakers4/silero-vad (local)
   stt.py           — STT backends: openai-audio (Groq), transformers-whisper, faster-whisper
-  nlu.py           — the openai-chat backend + the message assembly arms.llm() takes;
-                     structured extraction lands in VOX-019
+  nlu.py           — the openai-chat backend + the message assembly arms.llm() takes, and
+                     load_prompt(), shared by both prompt files; extraction lands in VOX-019
   audio.py         — speaker playback, kept apart from synthesis so VOX-011 can interrupt it
   loop.py          — one chained turn; `make demo`
   confirm.py       — confirmation flow logic (VOX-020, not yet written)
@@ -308,11 +308,14 @@ src/
   sources.py       — PDF corpus -> text chunks with (doc_id, page) provenance (VOX-029)
   retrieval.py     — BM25 over those chunks; top-k with provenance and a score floor (VOX-030).
                      The one stage with no provider, so the only one that writes no cost log line
+  answer.py        — those chunks -> a spoken answer with its doc:page, through arms.llm
+                     (VOX-031). A floor miss refuses here without calling any model
 
 sources/           — the PDF corpus. Gitignored: internal HR policies (see below)
 
 prompts/
   reply_v1.md      — spoken-reply prompt (versioned; never inline)
+  answer_from_source_v1.md — answer only from the retrieved excerpts, or refuse (VOX-031)
   extract_v1.md    — entity-extraction prompt (VOX-019, not yet written)
 
 schemas/
@@ -608,6 +611,65 @@ Two limits stated rather than glossed. It is a **13-query dev measurement**: a s
 VOX-033's gate over a written query set is what tests it at scale. And it has **no held-out
 number** — `heldout-v1` is sealed and contains zero document queries (its categories are greet /
 entity / ambig / escalate / refuse), and it is not reopened for this.
+
+---
+
+## Grounded answer (POC, VOX-031)
+
+The retrieved chunks become a spoken answer — `make answer Q="..."`, `src/answer.py`,
+`prompts/answer_from_source_v1.md`. **No new arm and no new provider.** The call goes out through
+`arms.llm()` like every other LLM call here, so the cost logger, the `--llm` flag, the rate-limit
+cooldown and the local ollama fallback all apply without a line of code. That is the whole reason
+the POC routes through `arms.llm` rather than calling `httpx` itself.
+
+```
+retrieve(question) ──> [] ──────────────────────────────> REFUSAL, sources []   no model call
+                   └─> hits ──> answer prompt + excerpts ──arms.llm──> answer, sources doc:page
+                                                                    └─> REFUSAL, sources []
+```
+
+**A floor miss never reaches the model.** No chunk cleared `RETRIEVAL_SCORE_FLOOR`, so there is
+nothing to be grounded *in* and nothing for a model to do but invent. That path costs no tokens, no
+round trip, and admits no hallucination — and it makes the refusal testable with no key, which is
+what lets VOX-033 measure a refusal rate offline.
+
+The model still has to refuse on the case the floor cannot catch: chunks that score well because
+they come from the document that *ought* to answer the question, and then stop short of the answer.
+Measured below, both paths fire.
+
+**One refusal sentence, not two.** `answer.REFUSAL` is the literal string in the prompt file, and
+`tests/unit/test_answer.py` asserts it. Two wordings would let a listener hear which path ran, and
+"the score floor rejected this" is an implementation detail of retrieval, not information about
+someone's leave. A model refusal has its `sources` emptied — citing four documents next to "I could
+not find that" would claim they support an answer that was never given.
+
+**Citations are the provenance of the context, not a choice the model made.** `sources` is the
+deduped `doc_id`/`page` of the chunks passed in, best first. The model is never asked to emit a
+citation token, so there is no format for it to get wrong — which matters because the fallback arm
+is a 3B and a parse failure there would land on the turn that had already gone wrong. The cost is
+stated rather than hidden: `sources` says what the answer was **grounded in**, up to five chunks,
+not which sentence it came from. VOX-033's correct-source@3 is a retrieval measurement and is
+unaffected; per-sentence attribution needs a different mechanism than this ticket bought.
+
+### Measured, `scripts/ask.py --answer`, 2026-08-20
+
+Four queries against the 215-chunk corpus. `prompt_tokens` and `latency_ms` are the real
+`runs/calls.jsonl` fields, not estimates.
+
+| question | chunks | prompt tok | arm | latency | outcome |
+|---|---|---|---|---|---|
+| how many casual leaves am I entitled to in a year | 3 | 1380 | Llama-3.1-8B @ nim | **942 ms** | answered, `leave-policy:p4,p3,p7` |
+| what is the dress code on casual fridays | 2 | 1069 | Llama-3.1-8B @ nim | **519 ms** | answered, `code-of-ethics…:p12` |
+| how much is the casual leave encashment paid per day | 4 | 1463 | Llama-3.1-8B @ nim | **691 ms** | **model refused** — chunks cleared the floor, answer not in them |
+| is there a canteen subsidy for lunch on working days | 0 | — | none called | **0 ms** | **refused before any call** — top-1 0.232 < floor 0.280 |
+| how many casual leaves … (same, `LLM=llama-3.2-3b`) | 3 | 1380 | Llama-3.2-3B @ ollama | **72 650 ms** | answered, same text and same sources |
+
+Two things to carry into VOX-032. Five 300-token chunks is ~2 000 prompt tokens, so `k=5` costs
+roughly **6x the plain-reply prompt** and the remote arm still answers inside a second. The local
+fallback does not: **72.6 s** against 0.94 s remote, on the same question and the same chunks. The
+plain-reply fallback was tolerable because its prompt was small; on the grounded path a rate limit
+does not cost the turn's quality, it costs the turn. That belongs in the latency table VOX-032
+adds, and it is an argument for `k` being the knob that moves first.
 
 ---
 

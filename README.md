@@ -103,8 +103,26 @@ someone puts documents there.
 
 `make ask Q="..."` retrieves over those chunks: BM25, the top 5 with `doc_id:page`, `chunk_idx` and
 a score, or **"not in the documents"** when the best score does not clear the measured floor. Still
-no network, no model call, no key. The grounded answer on top of it is VOX-031. Details and the
-measured numbers: the source-folder and retrieval sections of `ARCHITECTURE.md`.
+no network, no model call, no key.
+
+```bash
+make answer Q="how many casual leaves am I entitled to in a year"
+LLM=llama-3.2-3b make answer Q="..."      # answer with a different arm
+```
+
+`make answer` sends those same chunks to the LLM arm with `prompts/answer_from_source_v1.md` —
+answer only from these excerpts, or say you could not find it — and prints the spoken answer, the
+`doc_id:page` it was grounded in, and the `turn_id` joining the run to its `runs/calls.jsonl` line.
+It goes through `arms.llm`, so the cost logger, the `--llm` flag and the local fallback all apply;
+it is the one command here that needs a key.
+
+There are two ways it declines, and the output says which. A question that clears no chunk is
+refused with **no model call at all** — there is nothing to be grounded in, so there is nothing for
+a model to do but invent. A question whose chunks clear the floor and still do not contain the
+answer is refused by the model, and both say the same sentence out loud.
+
+Details and the measured numbers: the source-folder, retrieval and grounded-answer sections of
+`ARCHITECTURE.md`.
 
 ## Rules that live in this repo
 

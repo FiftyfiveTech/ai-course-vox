@@ -30,10 +30,21 @@ TEMPERATURE = 0.3
 OLLAMA_KEEP_ALIVE = -1
 
 
+def load_prompt(path):
+    """-> a versioned prompt file's body, YAML front matter stripped. Never inlined in code.
+
+    Here rather than in each module that has a prompt: VOX-031 added a second prompt file, and two
+    copies of this regex is two places for "the front matter leaked into the system message" to
+    happen. The front matter is metadata *about* the prompt — version, the arm it was written
+    against, what supersedes it — and no model should ever see it.
+    """
+    return re.sub(r"\A---\n.*?\n---\n", "", path.read_text(encoding="utf-8"),
+                  flags=re.DOTALL).strip()
+
+
 def system_prompt():
-    """The versioned prompt file with its YAML front matter stripped. Never inlined in code."""
-    text = PROMPT_FILE.read_text(encoding="utf-8")
-    return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
+    """The plain-reply prompt (VOX-018's reply_v1). VOX-031's answer prompt is in src/answer.py."""
+    return load_prompt(PROMPT_FILE)
 
 
 def messages(transcript):

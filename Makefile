@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask board clean
+.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask answer board clean
 .DEFAULT_GOAL := help
 
 help:
@@ -12,6 +12,7 @@ help:
 	@echo "make compare two whole architectures end to end, five-stage split for both (VOX-013)"
 	@echo "make index   extract the sources/ PDFs to text chunks and print the counts (VOX-029)"
 	@echo "make ask     Q=\"...\" retrieve the top chunks for a question, with file:page (VOX-030)"
+	@echo "make answer  Q=\"...\" the same chunks through the LLM arm, as a spoken answer (VOX-031)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 
 OLLAMA_MODEL := hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
@@ -110,6 +111,19 @@ index:
 ask:
 	@test -n "$(Q)" || { echo 'usage: make ask Q="how many casual leaves do I get"'; exit 1; }
 	uv run python scripts/ask.py "$(Q)"
+
+# VOX-031. The same retrieval, then the chunks that cleared the floor go to the LLM arm with
+# prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.
+# Prints the spoken answer, the doc:page it was grounded in, and the turn_id that joins this run to
+# its runs/calls.jsonl line. The one path in this script that makes a model call, so it needs a key
+# — NVIDIA_API_KEY for the default arm, and it falls back to the local ollama arm if the free tier
+# refuses. A query that clears no chunk is refused here with no call at all.
+#
+#   make answer Q="how many casual leaves am I entitled to in a year"
+#   LLM=gpt-oss make answer Q="..."      answer with a different arm
+answer:
+	@test -n "$(Q)" || { echo 'usage: make answer Q="how many casual leaves do I get"'; exit 1; }
+	uv run python scripts/ask.py "$(Q)" --answer $(if $(LLM),--llm $(LLM),)
 
 # Creds come from ~/.config/ai-course-board.env (ODOO_USER + ODOO_KEY), never from the repo.
 # Board coordinates come from .mcp.json env, so this checks the same config Claude Code uses.
