@@ -25,6 +25,9 @@ other person as a collaborator with push access.
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
+| `docs/learning/` | Concept primers, retro ledger, and the coach lesson pages. |
+| `tools/coach/` | The web-coach bridge and the NotebookLM sync script. |
+| `docs/CONTRIBUTING.md` | Branches, PRs, review, merge — read before your first PR. |
 
 ## Deliberately missing
 
@@ -88,6 +91,30 @@ arm for its `Retry-After` window so the next turn does not pay another doomed ro
 The LLM fallback needs ollama and one ~2 GB pull; `make setup` does it, and warns rather than fails
 if ollama is absent. Full rules, trigger table and measured numbers: the fallback section of
 `ARCHITECTURE.md`.
+
+## Learning: web coach and NotebookLM
+
+Each ticket ships a concept primer alongside the code, and two tools make them usable by
+someone who did not write the ticket:
+
+```bash
+make coach                                     # serve the lesson pages, 127.0.0.1:8765
+# open http://127.0.0.1:8765/vox-day1.html, then in Claude Code: "start web coach session"
+```
+
+The page shows the concept cards and a quiz; **DONE** sends every answer to Claude in one
+message, and Claude grades, argues back, and replies in the page's chat panel. The same page
+embeds short NotebookLM Video Overviews when they have been downloaded, and the shared
+notebook answers "why is TTS local?" in plain English with citations back to these docs.
+
+Setup (including the one-time `notebooklm login` and notebook creation), the sync script, and
+the rule about which files may never become a notebook source:
+[docs/learning/README.md](docs/learning/README.md).
+
+## Contributing
+
+Branch off `dev`, PR against `dev`, the other developer reviews and merges — never yourself.
+The full procedure, PR template and recovery steps: [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## Rules that live in this repo
 
