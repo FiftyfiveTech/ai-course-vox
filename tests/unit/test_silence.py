@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from src import loop, vad
+from src import loop, nlu, vad
 from src.config import (LLM_ARMS, SAMPLE_RATE, STT_ARMS, TTS_ARMS, VAD_FRAME, VAD_MIN_SPEECH_MS,
                         VAD_SILENCE_MS)
 from src.vad import DONE, MS_PER_FRAME, TOO_SHORT, WAITING, Endpointer, endpoint_frames
@@ -197,7 +197,7 @@ def silent_mic_turn(monkeypatch):
     calls = []
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: calls.append(1) or None)
     monkeypatch.setattr(loop.arms, "stt", unreachable)
-    monkeypatch.setattr(loop.nlu, "reply", unreachable)
+    monkeypatch.setattr(nlu, "reply", unreachable)
     monkeypatch.setattr(loop.arms, "tts", unreachable)
     monkeypatch.setattr(loop.audio, "play", unreachable)
     return calls

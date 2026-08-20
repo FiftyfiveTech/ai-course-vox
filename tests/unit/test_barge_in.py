@@ -24,7 +24,7 @@ import pytest
 import sounddevice as real_sd
 import torch
 
-from src import audio, loop, vad
+from src import audio, loop, nlu, vad
 from src.config import (BARGE_MIN_SPEECH_MS, BARGE_SPEECH_THRESHOLD, LLM_ARMS, SAMPLE_RATE,
                         STT_ARMS, TTS_ARMS, VAD_FRAME, VAD_SILENCE_MS, VAD_SPEECH_THRESHOLD)
 from src.vad import MS_PER_FRAME, SPEAKING, WAITING, Endpointer
@@ -334,7 +334,7 @@ def watched_turn(monkeypatch, playback=None, interrupting=None):
     monkeypatch.setattr(loop.audio, "play", play)
     monkeypatch.setattr(loop.vad, "listen", listen)
     monkeypatch.setattr(loop.arms, "stt", lambda a, *rest, **kw: heard.append(a) or "stop talking")
-    monkeypatch.setattr(loop.nlu, "reply", lambda *a, **kw: "Your last payslip was on the fourth.")
+    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: "Your last payslip was on the fourth.")
     monkeypatch.setattr(loop.arms, "tts", lambda *a, **kw: types.SimpleNamespace(
         audio=[0.0] * 240, sample_rate=24_000))
     return playback, heard
@@ -451,7 +451,7 @@ def test_only_the_last_turn_of_a_run_is_unwatched(monkeypatch, capsys):
     """Where barge-in is switched on: every reply that has a turn after it is interruptible."""
     watches = []
 
-    def one_turn(chosen, pending=None, watch=False):
+    def one_turn(chosen, pending=None, watch=False, idx=None):
         watches.append(watch)
         return loop.TurnResult(True, True, None)
 
@@ -469,7 +469,7 @@ def test_a_carried_capture_is_passed_to_the_next_turn_by_main(monkeypatch):
     cap = FakeCapture()
     seen = []
 
-    def one_turn(chosen, pending=None, watch=False):
+    def one_turn(chosen, pending=None, watch=False, idx=None):
         seen.append(pending)
         return loop.TurnResult(True, True, cap if pending is None else None)
 

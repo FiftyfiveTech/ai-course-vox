@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer test gate demo barge turn arms compare index ask answer board coach clean
+.PHONY: setup fallback-model tokenizer encoder test gate demo barge turn ground arms compare index ask answer board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -8,10 +8,12 @@ help:
 	@echo "make demo    run the thing end to end (needs a mic)"
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
+	@echo "make ground  one grounded turn from a recording — retrieval in the loop (VOX-032)"
 	@echo "make arms    call every registered model arm once and print the log (VOX-006)"
 	@echo "make compare two whole architectures end to end, five-stage split for both (VOX-013)"
 	@echo "make index   extract the sources/ PDFs to text chunks and print the counts (VOX-029)"
 	@echo "make ask     Q=\"...\" retrieve the top chunks for a question, with file:page (VOX-030)"
+	@echo "make floors  re-measure both retrieval floors on evals/dev and print the gaps"
 	@echo "make answer  Q=\"...\" the same chunks through the LLM arm, as a spoken answer (VOX-031)"
 	@echo "make board   verify the Odoo board MCP connection (auth + project pin)"
 	@echo "make coach   serve the interactive learning pages on 127.0.0.1:8765"
@@ -24,6 +26,7 @@ setup:
 	@test -f .env || { cp .env.example .env; echo "wrote .env from .env.example — fill it in"; }
 	@$(MAKE) --no-print-directory fallback-model
 	@$(MAKE) --no-print-directory tokenizer
+	@$(MAKE) --no-print-directory encoder
 	@echo "ok. next: make test"
 
 # The local LLM the turn falls back to when NIM rate-limits or the network is gone. A warning and
@@ -45,6 +48,13 @@ fallback-model:
 tokenizer:
 	uv run python -c "from src.sources import fetch_tokenizer; fetch_tokenizer()"
 
+# The sentence encoder for the dense half of retrieval (config.EMBED_ARMS[0]). ~130 MB, fetched
+# here so that neither `make index` nor a turn ever downloads weights while something is being
+# timed. A warning and not a failure: without it retrieval still runs on BM25 alone, which is
+# VOX-030's behaviour — a worse ranking, not a broken one.
+encoder:
+	@uv run python -c "from src.embeddings import fetch_encoder; fetch_encoder()" 		|| echo "warning: could not fetch the sentence encoder — retrieval will run on BM25 alone."
+
 # The whole unit suite lives under tests/unit/, which is what VOX-007's gate command names. Gates
 # are a separate target because they make real calls and need the dev set on disk.
 test:
@@ -54,10 +64,16 @@ gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 
-# One chained turn: mic -> silero-vad -> whisper-large-v3-turbo -> Llama-3.1-8B -> Kokoro-82M.
-# The two middle stages are remote and fall back to local arms if their free tier refuses; startup
-# warms those fallbacks and warns if one is not ready. Needs a working microphone and speakers.
-# First run downloads the Kokoro weights (~350 MB) and the faster-whisper-base fallback (~150 MB).
+# One chained turn: mic -> silero-vad -> whisper-large-v3-turbo -> retrieval -> Llama-3.1-8B ->
+# Kokoro-82M. The two model stages are remote and fall back to local arms if their free tier
+# refuses; startup warms those fallbacks and warns if one is not ready. Needs a working microphone
+# and speakers. First run downloads the Kokoro weights (~350 MB) and the faster-whisper-base
+# fallback (~150 MB).
+#
+# A question the policy documents cover is answered *from* them, with the doc:page printed under
+# the answer and logged on the turn line (VOX-032) — so `make index` first, or startup says why
+# nothing will be grounded and every turn takes the plain reply path. `--no-kb` forces that older
+# path for a whole run:  uv run python -m src.loop --no-kb
 demo:
 	uv run python -m src.loop
 
@@ -74,6 +90,13 @@ barge:
 # t_vad is not the live number.
 turn:
 	uv run python scripts/turn_from_fixture.py tests/fixtures/hello_testing_voice.mp3
+
+# VOX-032, without a microphone: the same loop, driven from a spoken question the corpus answers.
+# Retrieval runs after STT and the reply is written from the chunks that cleared the floor, so the
+# printed line names the doc:page and `runs/turns.jsonl` carries grounded/sources/t_retrieval_ms.
+# Needs `make index` and a speaker. See tests/fixtures/README.md on where the recording came from.
+ground:
+	uv run python scripts/turn_from_fixture.py tests/fixtures/casual_leave_question.mp3 --kb
 
 # Every arm in the registry, one real call each, then the runs/calls.jsonl lines those calls wrote.
 # `--list` alone prints the table without calling anything. First run downloads the local weights
@@ -94,10 +117,17 @@ arms:
 compare:
 	uv run python scripts/compare_arms.py
 
-# VOX-029. Every PDF in sources/ to runs/chunks.jsonl, then the counts read back off the file:
-# files, pages, chunks, and every page that produced no text by name. No network and no model call
-# — pypdf parses, and the tokenizer only counts. The folder is gitignored (internal HR policies),
-# so a clean clone has nothing to index until someone puts the corpus there.
+# VOX-029 + the dense half. Every PDF in sources/ to runs/chunks.jsonl, then the counts read back
+# off the file: files, pages, chunks, and every page that produced no text by name. pypdf parses and
+# the tokenizer only counts, so that part needs no network and no model call.
+#
+# Then the chunks are encoded and the vectors cached to runs/embeddings.npz (~25 s for 215 chunks on
+# CPU, once per re-index) — hybrid retrieval needs both halves built from the same text, and the
+# cache is keyed to it by fingerprint so a stale vector file is rejected rather than used to cite
+# the wrong page. `--no-embed` skips it and leaves retrieval on BM25 alone.
+#
+# The folder is gitignored (internal HR policies), so a clean clone has nothing to index until
+# someone puts the corpus there.
 index:
 	uv run python scripts/build_index.py
 
@@ -112,6 +142,14 @@ index:
 ask:
 	@test -n "$(Q)" || { echo 'usage: make ask Q="how many casual leaves do I get"'; exit 1; }
 	uv run python scripts/ask.py "$(Q)"
+
+# Both floors, re-measured against evals/dev/retrieval_floor_queries.json: the lexical one (a
+# fraction of the query's information content) and the dense one (a cosine). Prints each column,
+# whether it separates answerable from absent, and how the union rule that actually decides a
+# refusal routes all 13. No model call for the lexical half; one encoder pass per query for the
+# dense half. Run it after changing the corpus, the chunk geometry, the stopword list or the encoder.
+floors:
+	uv run python scripts/ask.py --calibrate
 
 # VOX-031. The same retrieval, then the chunks that cleared the floor go to the LLM arm with
 # prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.

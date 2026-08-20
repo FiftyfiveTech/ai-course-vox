@@ -6,7 +6,7 @@ work because `telemetry._append` looks the path up at call time — see the comm
 """
 import pytest
 
-from src import config, cooldown, retrieval, sources, telemetry
+from src import config, cooldown, embeddings, retrieval, sources, telemetry
 
 
 @pytest.fixture(autouse=True)
@@ -59,3 +59,22 @@ def chunks_file(tmp_path, monkeypatch):
     monkeypatch.setattr(sources, "CHUNKS_FILE", path)
     monkeypatch.setattr(retrieval, "_INDEX", None)
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_real_encoder(tmp_path, monkeypatch):
+    """No unit test may load the sentence encoder or write the real vector cache.
+
+    Autouse and off-by-default for the same reason `chunks_file` is: `retrieval.build()` reads
+    `HYBRID_RETRIEVAL` from config, and on a developer machine that is on — so a test that reached
+    the default path would quietly download ~130 MB of weights on a cold cache and then load them,
+    turning a 9-second suite into a network-dependent one. It did, once, which is why this exists.
+
+    A test that wants the dense half asks for it explicitly and supplies a fake encoder — see
+    tests/unit/test_hybrid.py. Nothing here can reach real weights by forgetting something.
+    """
+    monkeypatch.setattr(config, "HYBRID_RETRIEVAL", False)
+    monkeypatch.setattr(retrieval, "HYBRID_RETRIEVAL", False)
+    monkeypatch.setattr(config, "EMBEDDINGS_FILE", tmp_path / "embeddings.npz")
+    monkeypatch.setattr(retrieval, "EMBEDDINGS_FILE", tmp_path / "embeddings.npz")
+    monkeypatch.setattr(embeddings, "_LOADED", {})

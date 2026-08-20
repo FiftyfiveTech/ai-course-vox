@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from src import arms, loop
+from src import arms, loop, nlu
 from src.config import LLM_ARMS, STT_ARMS, TTS_ARMS
 
 DEFAULTS = {"stt": STT_ARMS[0], "llm": LLM_ARMS[0], "tts": TTS_ARMS[0]}
@@ -46,7 +46,7 @@ def turn(monkeypatch):
     played = []
     monkeypatch.setattr(loop.vad, "listen", lambda *a, **kw: FakeCapture())
     monkeypatch.setattr(loop.arms, "stt", lambda *a, **kw: "when was I paid")
-    monkeypatch.setattr(loop.nlu, "reply", lambda *a, **kw: ANSWER)
+    monkeypatch.setattr(nlu, "reply", lambda *a, **kw: ANSWER)
     monkeypatch.setattr(loop.audio, "play", lambda audio, **kw: played.append(kw) or None)
     return played
 

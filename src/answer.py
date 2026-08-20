@@ -9,8 +9,9 @@ That is the whole reason the POC routes through `arms.llm` instead of calling ht
 
 Four decisions worth knowing before reading the code:
 
-**A floor-miss never reaches the model.** `retrieval.retrieve()` returning `[]` means no chunk
-cleared `config.RETRIEVAL_SCORE_FLOOR` — there is nothing to be grounded *in*, so there is nothing
+**A floor-miss never reaches the model.** `retrieval.retrieve()` returning `[]` means no chunk was
+vouched for by either half of retrieval — neither `config.RETRIEVAL_SCORE_FLOOR` nor
+`config.DENSE_SCORE_FLOOR` — so there is nothing to be grounded *in*, so there is nothing
 for a model to do but invent. `answer()` returns `REFUSAL` with an empty source list and makes no
 call at all: no token spend, no round-trip, and no path on which a hallucination is even possible.
 It also means the refusal is testable without a key, which is what lets VOX-033's gate measure a
@@ -21,9 +22,15 @@ well because they come from the document that *ought* to answer the question, an
 the answer. "Is there a canteen subsidy" scoring 0.23 is a floor's job; the attendance policy
 mentioning working days without mentioning lunch is a prompt's job.
 
-**There is one refusal sentence, not two.** `REFUSAL` is the literal string in
-`prompts/answer_from_source_v1.md`, and `tests/unit/test_answer.py` asserts it appears there
-verbatim. If the deterministic refusal and the model's refusal were worded differently, a caller
+That division of labour carries more weight since retrieval grew a dense half, and the shift is
+measured: the dense cosine does not separate answerable questions from absent ones on the dev set
+(see `config.DENSE_SCORE_FLOOR`), so four of six absent dev queries now reach the model instead of
+being refused arithmetically. They are refused here, by the prompt, which is why the prompt is
+versioned and measured rather than assumed.
+
+**There is one refusal sentence, not two.** `REFUSAL` is the literal string in `PROMPT_FILE`
+(currently `prompts/answer_from_source_v2.md`), and `tests/unit/test_answer.py` asserts it appears
+there verbatim. If the deterministic refusal and the model's refusal were worded differently, a caller
 could tell which path ran — and "the score floor rejected this" is an implementation detail of
 retrieval, not something a person asking about leave should hear the shape of.
 
@@ -45,14 +52,25 @@ documents next to it would be a claim that they support an answer that was not g
 normalised equality against one constant string, not a parser: punctuation and case are ignored,
 anything else is treated as an answer. That direction is deliberate — a near-miss keeps its
 citations, which is safer than silently dropping the provenance off a reply that did answer.
+
+`turn_reply()` at the bottom is VOX-032: the same two paths as seen from inside a spoken turn —
+retrieve, and route to `answer()` or to the plain `nlu.reply()` on what comes back. It lives here
+rather than in `src/loop.py` because the mic loop and the recording harness both need it and a
+second copy of the routing is how the two quietly stop running the same pipeline.
 """
 import re
 from collections import namedtuple
+from contextlib import contextmanager
 
 from src import nlu, retrieval
 from src.config import PROMPTS_DIR
 
-PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v1.md"
+# v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
+# answered "you will be paid 12,000" to a leave-encashment question whose excerpt gave a formula and
+# no such number — cited, fluent and wrong. Versioned as a new file rather than edited in place
+# (VOX-018): the old prompt is what the numbers in ARCHITECTURE.md were measured against, and a
+# prompt you can no longer read is a measurement you can no longer reproduce.
+PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v2.md"
 
 # The one refusal, shared by the two paths that can produce it: this module when no chunk clears the
 # floor, and the model when the chunks that did clear it do not contain the answer. Written out
@@ -163,7 +181,7 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     which is the behaviour VOX-006 chose and this ticket does not get to soften.
     """
     if hits is None:
-        hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx)
+        hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
 
     if not hits:
         # No model call: see the module docstring. Nothing cleared the floor, so there is no context
@@ -182,3 +200,101 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     if is_refusal(text):
         return Answer(REFUSAL, [], hits, grounded=False)
     return Answer(text, cited(hits), hits, grounded=True)
+
+
+# --- inside a turn (VOX-032) -------------------------------------------------------------------
+
+# What the reply stage of one turn produced. `answer` is the Answer on the grounded path and None
+# on the plain one, so a caller can tell *which path ran* without re-deriving it from `hits` —
+# and `text` is what goes to TTS either way, which is the only thing the speaker needs to know.
+Reply = namedtuple("Reply", "text answer hits")
+
+
+def knowledge_base(echo=print):
+    """-> the process-wide retrieval index, or None if this machine has nothing indexed.
+
+    Called once at startup, not per turn: building the index is per-process work (see
+    retrieval.index()), and a build inside the first turn would land in a stage number and make
+    the latency split a lie.
+
+    None is a supported state, not an error. `sources/` is gitignored — internal HR policies — so a
+    clean clone has no corpus and no chunk file, and `make demo` still has to run for whoever is
+    standing in front of it. What must not happen is that state being *silent*: a demo that quietly
+    stopped being grounded because nobody ran `make index` looks exactly like one where retrieval
+    found nothing, and only one of the two is a working system. So the reason is printed here,
+    once, and every turn afterwards says nothing.
+    """
+    try:
+        idx = retrieval.index()
+    except RuntimeError as e:
+        echo(f"no knowledge base: {e}\n"
+             f"  turns will answer from the plain reply prompt — nothing will be grounded.")
+        return None
+    echo(f"knowledge base: {len(idx)} chunks over {len(idx.doc_ids)} documents "
+         f"({', '.join(idx.doc_ids[:4])}{', …' if len(idx.doc_ids) > 4 else ''})")
+    return idx
+
+
+def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallback=None,
+               fallback=True, k=None, floor=None):
+    """One turn's reply: grounded in the documents when they cover the question, plain when not.
+
+    -> Reply(text, answer, hits). The whole of VOX-032's routing decision, in one place because
+    `src/loop.py` and `src/harness.fixture_turn` both need it and a second copy is how a
+    comparison ends up timing a pipeline the live loop does not run.
+
+    The decision is retrieval's, not a classifier's: chunks that clear `RETRIEVAL_SCORE_FLOOR` go
+    to `answer()`, an empty list goes to `nlu.reply()` exactly as every turn did before this
+    ticket. The floor was measured (`scripts/ask.py --calibrate`), which is the reason it gets to
+    be the router — an intent model in front of it would be a second, unmeasured decision, and it
+    would fail in the expensive direction: a misrouted greeting costs a plain reply, a misrouted
+    "how much casual leave" costs an invented policy number.
+
+    `idx=None` means this machine has no knowledge base (see `knowledge_base()`) and skips
+    retrieval altogether — that is not the same as retrieval returning nothing, and the two are
+    distinguishable on the turn record: `t_retrieval_ms` is absent in the first case and measured
+    in the second.
+
+    `turn` is the TurnTimer. Retrieval is timed on it outside the llm stage, and the grounding is
+    stamped on it — both so a turn line can be read afterwards without guessing which path it took.
+    Left as None (a caller with no turn record, i.e. a test) nothing is timed and the routing is
+    unchanged.
+    """
+    hits = []
+    if idx is not None:
+        with _timing(turn, "retrieval"):
+            # turn_id goes down into retrieval because the dense half makes a model call now: the
+            # query encoding is a line in runs/calls.jsonl, and a line with a null turn_id joins to
+            # nothing, which is the one thing the two-log design exists to prevent.
+            hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
+
+    with _timing(turn, "llm"):
+        if hits:
+            got = answer(transcript, turn_id, hits=hits, model_id=model_id,
+                         on_fallback=on_fallback, fallback=fallback)
+            text = got.text
+        else:
+            # Nothing cleared the floor, or there is no corpus at all. Either way there is nothing
+            # to be grounded in, so the turn behaves as it did before this ticket existed.
+            got = None
+            text = nlu.reply(transcript, turn_id, model_id=model_id,
+                             on_fallback=on_fallback, fallback=fallback)
+
+    if turn is not None:
+        turn.grounding(hits, grounded=bool(got and got.grounded),
+                       sources=got.labels if got else [])
+    return Reply(text, got, hits)
+
+
+@contextmanager
+def _timing(turn, what):
+    """Time `what` on `turn` if there is one. `retrieval` is a turn field, `llm` a stage — see
+    TurnTimer.retrieval() on why the two are recorded differently."""
+    if turn is None:
+        yield
+    elif what == "retrieval":
+        with turn.retrieval():
+            yield
+    else:
+        with turn.stage(what):
+            yield

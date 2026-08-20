@@ -3,6 +3,7 @@
     stt(audio, model_id)  -> transcript
     llm(msgs,  model_id)  -> reply text
     tts(text,  model_id)  -> Speech(audio, sample_rate)
+    embed(texts, model_id) -> (n, dim) unit vectors
 
 `model_id` is a Hugging Face repo id — `openai/whisper-base`, or `repo/id@provider` when two
 providers serve the same weights, or the short alias for typing at a prompt. None means the stage
@@ -25,7 +26,7 @@ when the remote one fails in a way another arm could survive. See `_call`.
 import sys
 from collections import namedtuple
 
-from src import cooldown, errors, nlu, stt as stt_mod, tts as tts_mod
+from src import cooldown, embeddings as embed_mod, errors, nlu, stt as stt_mod, tts as tts_mod
 from src.config import (ARMS, DEFAULT_COOLDOWN_S, FALLBACKS, SAMPLE_RATE, STT_LANGUAGE,
                         resolve)
 from src.telemetry import log_call
@@ -34,7 +35,7 @@ from src.telemetry import log_call
 # instead of leaving the speaker to assume one.
 Speech = namedtuple("Speech", "audio sample_rate")
 
-_MODULES = {"stt": stt_mod, "llm": nlu, "tts": tts_mod}
+_MODULES = {"stt": stt_mod, "llm": nlu, "tts": tts_mod, "embed": embed_mod}
 
 
 def available(stage=None):
@@ -87,13 +88,13 @@ def describe(chosen):
     phase gate all have to say the same thing. They had a copy each, which is one copy per chance
     for the gate to describe a pipeline the loop does not actually run.
     """
-    lines = [f"  {'vad':<4} snakers4/silero-vad  (local, silero)"]
+    lines = [f"  {'vad':<5} snakers4/silero-vad  (local, silero)"]
     for stage, arm in chosen.items():
         where = "local" if arm.local else f"remote via {arm.provider}"
-        lines.append(f"  {stage:<4} {arm.repo_id}  ({where}, {arm.backend})")
+        lines.append(f"  {stage:<5} {arm.repo_id}  ({where}, {arm.backend})")
         fb = fallback_for(stage, arm)
         if fb is not None:
-            lines.append(f"  {'':<4}   fallback -> {fb.repo_id} (local, {fb.backend})")
+            lines.append(f"  {'':<5}   fallback -> {fb.repo_id} (local, {fb.backend})")
     return "\n".join(lines)
 
 
@@ -251,3 +252,23 @@ def tts(text, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     audio, ran = _call("tts", arm, text, turn_id, on_fallback, fallback,
                        chars=len(text), sample_rate=arm.extra["sample_rate"])
     return Speech(audio, ran.extra["sample_rate"])
+
+
+def embed(texts, model_id=None, *, turn_id, is_query=False, fallback=False, **extra):
+    """-> (n, dim) float32 unit vectors for `texts`, from the named encoder or the stage default.
+
+    `fallback` defaults to **False**, which is the opposite of every other arm here, and it is not
+    an oversight: an encoder's output only means anything against vectors from the same encoder. A
+    substitution would answer the query in one vector space and compare it against a cached index
+    built in another, and every cosine that came out would be arithmetic between unrelated bases —
+    silently, since a meaningless cosine is still a number between -1 and 1. `config.FALLBACKS` has
+    no `embed` entry for the same reason; this argument exists only so the signature does not lie
+    about what `_call` supports.
+
+    `is_query=True` prepends the arm's query instruction for an asymmetric encoder. Chunks are
+    encoded without it. See src/embeddings.py.
+    """
+    arm = resolve("embed", model_id)
+    payload = {"texts": texts, "is_query": is_query}
+    result, _ran = _call("embed", arm, payload, turn_id, None, fallback, **extra)
+    return result

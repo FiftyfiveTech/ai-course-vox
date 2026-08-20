@@ -33,6 +33,28 @@ turn line to `runs/turns.jsonl`. Read its `t_vad` and `time_to_first_audio` with
 script's docstring: frames arrive as fast as the CPU allows, so the ~1.1 s hangover a live turn
 waits out is missing from them.
 
+## casual_leave_question.mp3
+
+**Synthesised, not recorded.** `hexgrad/Kokoro-82M` reading *"how many casual leaves am I entitled
+to in a year"*, written 2026-08-20 for VOX-032. 3.48 s, mono, 16 kHz, 18 KB.
+
+It exists because VOX-032 put retrieval inside the turn, and the only way to demonstrate that
+without standing at a microphone is to hand the loop a spoken question the corpus can answer:
+
+```
+make ground        # scripts/turn_from_fixture.py tests/fixtures/casual_leave_question.mp3 --kb
+```
+
+That prints the doc:page the answer was grounded in and appends `grounded`, `sources` and
+`t_retrieval_ms` to `runs/turns.jsonl`. Needs `make index` to have run — the corpus itself is
+gitignored, so this file is a *question* about internal documents and contains none of their
+content.
+
+Being synthetic is the point and also the caveat: it is clean, evenly paced audio with no room
+tone, so it says nothing about STT on real speech. It is here to exercise the routing, not the
+recogniser — which is why the human recording above is still the one the endpointing regressions
+are checked against.
+
 For just the endpointing decision:
 
 ```python

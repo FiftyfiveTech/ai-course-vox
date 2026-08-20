@@ -17,12 +17,19 @@ differ only in whether anything was still playing when they arrived.
 
 Which model runs each stage is a flag (VOX-006), and the arms are named on the turn record, so two
 runs with different arms cannot be quietly averaged together.
+
+A turn about the policy documents is answered *from* them (VOX-032). After STT the transcript goes
+to retrieval, and the chunks that clear the score floor are what the reply is written from — with
+the doc:page it came from printed under the answer and logged on the turn line. A question the
+documents do not cover retrieves nothing and is answered by the plain reply prompt, exactly as
+every turn was before. `--no-kb` forces that older path for the whole run, which is how the two are
+compared without editing code.
 """
 import argparse
 import sys
 from collections import namedtuple
 
-from src import arms, audio, nlu, vad
+from src import answer as answer_mod, arms, audio, vad
 from src.config import BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE
 from src.errors import RateLimited
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
@@ -75,7 +82,7 @@ def speak_and_watch(turn, speech):
     return cap
 
 
-def one_turn(chosen, pending=None, watch=False):
+def one_turn(chosen, pending=None, watch=False, idx=None):
     """-> TurnResult(spoken, keep_going, pending). `chosen` maps stage -> Arm.
 
     Three separate facts, because one bool used to carry the first two and they came apart at the TTS
@@ -91,6 +98,10 @@ def one_turn(chosen, pending=None, watch=False):
     open with no turn left to carry an interruption into would only make the process sit through
     max_wait_s before exiting — so `make demo` with its default single turn behaves exactly as
     VOX-002 and VOX-003 measured it.
+
+    `idx` is the retrieval index, built once by `main()` before any turn starts. None means this run
+    has no knowledge base — either nothing indexed or `--no-kb` — and every reply comes from the
+    plain prompt.
     """
     turn_id = new_turn_id()
     print(f"\n--- turn {turn_id} ---")
@@ -121,14 +132,18 @@ def one_turn(chosen, pending=None, watch=False):
             print("empty transcript from STT — not calling the LLM.", file=sys.stderr)
             return TurnResult(False, False, None)
 
-        with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
-                               on_fallback=turn.fallback)
-        print(f"vox says : {answer!r}")
+        # VOX-032. Retrieve first, then answer from what came back: chunks that cleared the floor
+        # go through the grounded prompt, an empty list goes to the plain reply prompt exactly as
+        # every turn did before. `idx=None` (no corpus on this machine) skips retrieval entirely —
+        # announced once at startup, not once per turn.
+        reply = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
+                                      model_id=chosen["llm"].id, on_fallback=turn.fallback)
+        print(f"vox says : {reply.text!r}")
+        print("  " + grounding(reply, kb=idx is not None))
 
         try:
             with turn.stage("tts"):
-                speech = arms.tts(answer, chosen["tts"].id, turn_id=turn_id,
+                speech = arms.tts(reply.text, chosen["tts"].id, turn_id=turn_id,
                                   on_fallback=turn.fallback)
         except Exception as e:
             # The reply is fine; only the voice failed. Losing the whole turn over that throws away
@@ -138,7 +153,7 @@ def one_turn(chosen, pending=None, watch=False):
             turn.extra["degraded"] = "tts"
             turn.extra["degrade_reason"] = f"{type(e).__name__}: {e}"
             print(f"TTS FAILED ({type(e).__name__}: {e}) — text only, nothing was spoken:\n"
-                  f"  {answer}", file=sys.stderr)
+                  f"  {reply.text}", file=sys.stderr)
             # Nothing is playing, so there is nothing to interrupt and nothing to carry forward. The
             # next turn opens the mic for itself, exactly as it did before barge-in existed.
             return TurnResult(False, True, None)
@@ -159,6 +174,27 @@ def one_turn(chosen, pending=None, watch=False):
         print("nothing heard after the reply — stopping.")
         return TurnResult(True, False, None)
     return TurnResult(True, True, next_cap)
+
+
+def grounding(reply, kb=True):
+    """The line under the answer that says what it was grounded in, or why it was not.
+
+    Printed on every turn rather than only on the grounded ones. A run where retrieval silently
+    stopped contributing — a re-index that produced nothing, a floor edited upwards — looks from the
+    outside like a run of questions the documents happen not to cover, and those two need to be
+    distinguishable while the demo is happening, not afterwards in the JSONL.
+
+    `kb` is False when this run has no index at all, which is why "nothing was retrieved" and
+    "nothing was retrievable" do not read the same here.
+    """
+    if reply.answer is None:
+        return ("plain reply — nothing was retrieved: no chunk cleared the floor" if kb
+                else "plain reply — no knowledge base on this run")
+    if not reply.answer.grounded:
+        return (f"refused by the model — {len(reply.hits)} chunk(s) cleared the floor "
+                f"({', '.join(h.source for h in reply.hits)}) but do not answer it")
+    return (f"grounded in {', '.join(reply.answer.labels)} "
+            f"(top score {reply.hits[0].score:.3f}, {len(reply.hits)} chunks in context)")
 
 
 def report(rec):
@@ -189,6 +225,9 @@ def main():
     ap.add_argument("--turns", type=int, default=1,
                     help="how many turns before exiting. Every turn but the last plays its reply "
                          "with the mic open, so 2 or more is what makes barge-in demonstrable")
+    ap.add_argument("--no-kb", action="store_true",
+                    help="skip retrieval and answer every turn from the plain reply prompt "
+                         "(VOX-032). The pre-RAG loop, for comparing against it without an edit")
     arms.add_flags(ap)
     args = ap.parse_args()
 
@@ -202,13 +241,20 @@ def main():
     chosen = arms.select(args)
     print(arms.describe(chosen))
 
+    # Built here for the same reason the weights are loaded here: it is per-process work, and a
+    # build inside the first turn would land in that turn's numbers. None is a supported state —
+    # see answer_mod.knowledge_base() — and the reason is printed there rather than per turn.
+    idx = None if args.no_kb else answer_mod.knowledge_base()
+    if args.no_kb:
+        print("knowledge base: off (--no-kb) — every reply comes from the plain reply prompt")
+
     print(f"\n{CONSENT_NOTICE}\n")
 
     spoken = 0
     pending = None
     for i in range(args.turns):
         try:
-            result = one_turn(chosen, pending=pending, watch=i < args.turns - 1)
+            result = one_turn(chosen, pending=pending, watch=i < args.turns - 1, idx=idx)
         except RateLimited as e:
             # Caught here and not inside the turn: a turn cannot decide the session is over, and
             # the wait is longer than a turn anyway. The turn record already carries the error,
