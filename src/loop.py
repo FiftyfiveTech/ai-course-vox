@@ -22,7 +22,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from src import arms, audio, nlu, vad
+from src import arms, audio, nlu, state, vad
 from src.config import BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE
 from src.errors import RateLimited
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
@@ -122,9 +122,11 @@ def one_turn(chosen, pending=None, watch=False):
             return TurnResult(False, False, None)
 
         with turn.stage("llm"):
-            answer = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
-                               on_fallback=turn.fallback)
-        print(f"vox says : {answer!r}")
+            turn_state = state.build(transcript, turn_id, model_id=chosen["llm"].id)
+            answer = turn_state.reply
+        print(f"vox says : {answer!r}  "
+              f"[intent={turn_state.intent} conf={turn_state.confidence:.2f} "
+              f"next={turn_state.next_action}]")
 
         try:
             with turn.stage("tts"):
