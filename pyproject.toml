@@ -1,6 +1,6 @@
 [project]
 name = "ai-course-track"
-version = "0.1.0"
+version = "1.0.0"
 description = "<TRACK> — FiftyFive AI engineering course"
 # 3.12, not 3.14: torch has no 3.14 wheels, and both silero-vad and kokoro need it.
 requires-python = ">=3.10,<3.13"
