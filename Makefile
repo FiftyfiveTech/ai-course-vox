@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer encoder test gate demo barge turn ground arms compare index ask answer board coach clean
+.PHONY: setup fallback-model tokenizer encoder test gate demo barge turn ground arms compare index ask answer gate-poc board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -165,6 +165,18 @@ ask:
 # dense half. Run it after changing the corpus, the chunk geometry, the stopword list or the encoder.
 floors:
 	uv run python scripts/ask.py --calibrate
+
+# VOX-033. The POC gate: ten written queries from evals/dev/pdf_queries.json through the same
+# retrieval and answer path the turn loop runs. Prints correct-source@3 over the 8 answerable, the
+# refusal rate over the 2 the corpus does not cover, and the grounded-answer rate with its
+# denominator; exits non-zero below the floors named in the script. Up to ten free-tier LLM calls,
+# so it needs a key and falls back locally like every other model call. Dev-only by construction —
+# heldout-v1 holds zero document queries, and the gate says so in its own output.
+#
+# Not reachable through `make gate`: that is `pytest tests/gates`, which collects nothing here
+# because these gates expose main() rather than test_* functions. Run directly, as their docstrings say.
+gate-poc:
+	uv run python tests/gates/gate_poc_pdf.py
 
 # VOX-031. The same retrieval, then the chunks that cleared the floor go to the LLM arm with
 # prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.
