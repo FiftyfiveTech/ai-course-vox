@@ -880,8 +880,17 @@ At temperature 0.3 one query routed wrong here — "how many days of sabbatical 
 came back as *"There is no mention of sabbatical leave in the provided excerpts"*, which is a
 refusal in substance but not the `REFUSAL` string, so `is_refusal()` read it as an answer and the
 turn logged `grounded: true`. It went away with deterministic sampling, below. It is worth
-remembering as a shape rather than a fixed bug: a paraphrased refusal counts as an answer, and
-VOX-033's rate has to survive that.
+remembering as a shape rather than a fixed bug: a paraphrased refusal counts as an answer.
+
+VOX-033's gate survives it by counting refusal-shaped phrasings itself — a list in
+`gate_poc_pdf.REFUSAL_SHAPES`, every entry naming the *source* ("no mention of", "does not contain",
+"not stated in") rather than being a bare negation, because "there is no cap on carry forward" is an
+answer. `answer.is_refusal()` is deliberately **not** widened: it decides what the live turn loop
+writes into `runs/turns.jsonl`, so changing it re-opens every number in this section, which is its
+own before/after measurement rather than a side effect of writing a gate. The gate prints how many
+it caught, and the reply that produced each — being generous about what counts as a refusal is
+generous in the direction that makes the gate easier to pass, so it is auditable rather than
+trusted. Caught on the ten-query set as measured below: **0**.
 
 ### The prompt had to move too: `answer_from_source_v2.md`
 
@@ -962,9 +971,73 @@ the right failure: a refusal costs a question, a wrong rupee figure costs trust.
   some excerpt happened to contain a 12 — as one did. What killed that reply was the caller's own
   `20`, not the wrong unit on the `12`. Catching a number that is real but means something else
   needs a different mechanism than this one.
-- **The dev set is 13 queries**, all written before any of this was known. It is a starting point,
-  not a distribution; the queries in this section are not in it, and adding them is the first thing
-  VOX-033 should do.
+- **The floor-calibration set is 13 queries**, all written before any of this was known. It is a
+  starting point, not a distribution. The queries in this section were not in it; VOX-033 added them
+  to a second set, `evals/dev/pdf_queries.json`, scored below. Two files rather than one, because
+  those thirteen are what `RETRIEVAL_SCORE_FLOOR` was fitted to and a gate scored on them measures
+  how well the floor was fitted.
+
+---
+
+## The POC gate: what the grounded path actually scores (VOX-033)
+
+`make gate-poc` -> `tests/gates/gate_poc_pdf.py` over `evals/dev/pdf_queries.json`: ten written
+queries, eight with an expected source `file:page` and two the corpus does not cover. Measured
+2026-08-21, `meta-llama/Llama-3.1-8B-Instruct` on the NVIDIA NIM free tier, identical across two
+consecutive runs:
+
+| number | measured | floor | asserted? |
+|---|---|---|---|
+| correct-source@3 | **7/8 = 0.875** | 0.875 | yes |
+| refusal rate on the 2 absent | **2/2 = 1.000** | 1.000 | yes |
+| grounded-answer rate | **8/8 = 1.000** | — | no |
+| ...grounded *on an expected source* | **7/8 = 0.875** | — | no |
+| paraphrased refusals caught | **0** | — | no |
+
+19 model calls, `cost_usd=0.0` on every one (10 local encoder passes, 9 remote LLM — q10 is refused
+by the floor with no call at all).
+
+**The last two rows are the finding.** A grounded-answer rate of 8/8 next to a correct-source@3 of
+7/8 is not a rounding difference: `grounded` only says a model answered from the excerpts it was
+handed, and it is true even when those excerpts came off the wrong pages. q03 — *"how much my
+leaving cashment would be"*, the STT-damaged form of q02 — retrieved `leave-policy` p7/p10 (leave
+accrual arithmetic, dense-half hits at lexical score 0.000) and answered *"any excess beyond 24 days
+will be subject to encashment"* from them. Fluent, grounded, cited, and off the wrong document; the
+rule it was asked about is on `separation-policy` p13 and p26. So the rate is printed with the
+intersection under it, and the intersection is the honest reading.
+
+That is also why the grounded-answer rate is not asserted. It is bounded above by correct-source@3
+and below by the numeric guard's correct refusals, so a floor on it would fail this gate twice for
+one cause.
+
+**The floor is 7/8 and the measurement is 7/8, by design rather than by luck.** The one query of
+slack is spent in advance on q03, named in the query set's `_note` before the gate first ran: it is
+a measurement of STT damage, not of retrieval, and it is the concrete case VOX-021's vocabulary
+biasing exists for. Seven clean queries pass; a regression on any of them takes this to 6/8 and
+fails. Two of the seven are hits at rank 3 and not rank 1 — the dress-code question, where
+`code-of-ethics` p12 and `annual-event-policy` p3 both outrank the right page — which is what makes
+@3 rather than @1 the number worth printing.
+
+**Two candidate labels were cut rather than relabelled**, and they are the reason every label was
+read off `runs/chunks.jsonl` before it was written down. *"Can I accept a gift from a vendor"* looked
+like an absent query because retrieval missed it — but `grep -ic gift runs/chunks.jsonl` returns 5,
+so the corpus does cover it and the label would have been false. *"Who pays for my hotel stay on
+official travel"* looked answerable — but `travel-policy` has no accommodation section and "hotel"
+appears only incidentally, in a clause about travel *from* the hotel to the office. Label error is
+the one failure mode that fails a gate for nothing.
+
+**The two absent queries take the two different refusal paths on purpose**, because `src/answer.py`
+distinguishes them and only one involves a model: q09 (paid menstrual leave) clears the floor on
+leave-policy chunks about other leave types and is refused *by the model* from excerpts that look
+relevant; q10 (health insurance coverage) is rejected by the floor and refused with no model call.
+Both are HR-shaped and share corpus vocabulary, and neither subject appears anywhere in the corpus.
+
+**Limit, printed in the gate's own output rather than left here.** These queries are dev-only.
+`evals/heldout/` is sealed as `heldout-v1` and holds zero document queries — its categories are
+greet / entity / ambig / escalate / refuse — and it was not reopened for this. So none of the numbers
+above has a held-out counterpart, and nothing bounds how much the implementation was shaped by these
+ten cases. Reopening a sealed set to add a category is how a held-out set becomes a dev set with
+extra ceremony; the cost of not doing it is this paragraph.
 
 ---
 
