@@ -17,13 +17,13 @@ from src import errors
 from src.config import PROMPTS_DIR
 from src.telemetry import log_call
 
-PROMPT_FILE = PROMPTS_DIR / "extract_v1.md"
+PROMPT_FILE = PROMPTS_DIR / "extract_v2.md"
 
 # Extraction needs precision, not creativity. Temperature 0 gives deterministic output.
 TEMPERATURE = 0.0
 # Enough for the JSON object + reply text. Intentionally smaller than the reply budget so
 # a reasoning arm cannot silently spend the whole budget thinking.
-MAX_TOKENS = 350
+MAX_TOKENS = 512
 
 
 def _system_prompt() -> str:
