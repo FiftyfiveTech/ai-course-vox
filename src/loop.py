@@ -46,7 +46,7 @@ from collections import namedtuple
 
 from src import answer as answer_mod, arms, audio, confirm, state, vad
 from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE, SESSION_MINUTES,
-                        SESSION_QUIET_LIMIT)
+                        SESSION_QUIET_LIMIT, utf8_console)
 from src.errors import RateLimited
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
 
@@ -121,10 +121,16 @@ class Budget:
         return f"{total // 60}:{total % 60:02d}"
 
 
-def speak_and_watch(turn, speech):
+def speak_and_watch(turn, speech, listen=None):
     """Play the reply with the mic open, and stop it if the user talks over it (VOX-011).
 
     -> the Capture that arrived during or after the reply, or None if nothing was said.
+
+    `listen` replaces where the interrupting audio comes from, and nothing else: the threshold, the
+    confirmation window, the mark the stop latency is measured from and the carry-forward all stay
+    here. A scripted rehearsal (VOX-026) passes a listener over paced frames from a recording, so
+    the barge-in it measures is this function and not a copy of it with a sleep in the middle.
+    Resolved at call time, so monkeypatching `vad.listen` still reaches the default.
 
     Two streams, not one duplex stream: the mic runs at 16 kHz for silero and whisper, and Kokoro
     emits 24 kHz. A single duplex stream takes one sample rate, so it would mean resampling the reply
@@ -146,7 +152,13 @@ def speak_and_watch(turn, speech):
         # Read while the stream is still open — `close()` below takes the latency with it.
         cut.update(stop_ms=round((stopped_t - first_speech_t) * 1000, 1),
                    played_s=playback.played_s, out_latency_s=playback.out_latency_s)
-        print(f"  ── barge-in: stopped {cut['stop_ms']:.0f}ms after you started speaking "
+        # An em dash and not the box-drawing character this line used to open with: U+2500 is not in
+        # cp1252, which is what a Windows console encodes to unless something has changed it, and
+        # this print runs at the exact instant of a barge-in — inside `on_speech`, after `abort()`
+        # has already cut the reply. A UnicodeEncodeError here propagates out of the endpointer and
+        # kills the turn *after* the interruption worked, which is the worst possible place for a
+        # cosmetic character to live. Found by the VOX-026 dry run, on the demo machine.
+        print(f"  — barge-in: stopped {cut['stop_ms']:.0f}ms after you started speaking "
               f"({cut['played_s']:.1f}s of {playback.reply_s:.1f}s played)", flush=True)
 
     try:
@@ -154,13 +166,79 @@ def speak_and_watch(turn, speech):
         # the utterance carried into the next turn is endpointed slightly more conservatively than a
         # turn that began in silence. That is the price of one listener instead of two, and it is
         # visible: the next turn's record says its input was carried in.
-        cap = vad.listen(on_speech=on_speech, threshold=BARGE_SPEECH_THRESHOLD, announce=False)
+        cap = (listen or vad.listen)(on_speech=on_speech, threshold=BARGE_SPEECH_THRESHOLD,
+                                     announce=False)
     finally:
         playback.close()
 
     if cut:
         turn.barge(cut["stop_ms"], cut["played_s"], playback.reply_s, cut["out_latency_s"])
     return cap
+
+
+def _say(line):
+    """print, flushed — stdout is block-buffered when it is not a terminal, and a demo that is
+    being recorded is exactly the case where the order of the lines is the record."""
+    print(line, flush=True)
+
+
+def confirmation_leg(turn, turn_id, chosen, turn_state, listen=None, play=True, say=_say):
+    """VOX-020's second exchange inside one turn: read back, hear yes or no, proceed or cancel.
+
+    -> "yes" | "no" | "unclear", or None when this turn asked for no confirmation.
+
+    A function rather than a block inside `one_turn` for the same reason `speak_and_watch` takes a
+    listener: a rehearsal has to be able to drive this leg from a recording (VOX-026), and the one
+    thing it must not do is own a second copy of the yes/no policy. `listen` is where the audio
+    comes from and nothing else.
+
+    **The two calls here are timed into their own fields, not into `turn.stage()`.** They are the
+    second `stt` and the second `tts` of one turn, and `TurnTimer.stage` overwrites: timed as stages
+    they replaced `t_stt_ms` — the latency of the utterance that started the turn — with the latency
+    of transcribing the word "yes", and `t_tts_ms` with the cancel sentence instead of the read-back.
+    Those are two of the five VOX-003 fields the phase gates percentile, and a confirmation turn is
+    the turn whose real latency matters most. `t_confirm_stt_ms` / `t_confirm_tts_ms` keep both legs
+    readable; `stage_sum_ms` stays the five-field sum it has always been.
+    """
+    if not confirm.needs_confirmation(turn_state):
+        return None
+
+    say("  [confirmation required — listening for yes/no]")
+    turn.extra["confirmation_required"] = True
+
+    def timed(field, fn):
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            turn.extra[field] = round((time.perf_counter() - t0) * 1000, 1)
+
+    yn_cap = (listen or vad.listen)(announce=False)
+    if yn_cap is None:
+        say("  nothing heard — treating as cancel")
+        response, transcript = "no", None
+    else:
+        transcript = timed("t_confirm_stt_ms", lambda: arms.stt(
+            yn_cap.segment, chosen["stt"].id, turn_id=turn_id, on_fallback=turn.fallback))
+        response = confirm.classify_response(transcript)
+        say(f"  confirmation response: {transcript!r} -> {response}")
+
+    turn.extra["confirmation"] = response
+    turn.extra["confirmation_transcript"] = transcript
+
+    if response == "yes":
+        # Nothing is written anywhere: this is an internal read-only demo and the ticket's
+        # constraint says so. The confirmation gate is what would guard the write.
+        say("  confirmed — action would proceed here")
+        return response
+
+    text = confirm.cancelled_reply() if response == "no" else confirm.unclear_reply()
+    speech = timed("t_confirm_tts_ms", lambda: arms.tts(
+        text, chosen["tts"].id, turn_id=turn_id, on_fallback=turn.fallback))
+    if play:
+        audio.play(speech.audio, sample_rate=speech.sample_rate)
+    say(f"  {'cancelled' if response == 'no' else 'unclear'}: {text!r}")
+    return response
 
 
 def one_turn(chosen, pending=None, watch=False, idx=None):
@@ -274,35 +352,8 @@ def one_turn(chosen, pending=None, watch=False, idx=None):
         # VOX-020: if the LLM asked for confirmation, listen for yes/no. A grounded answer has no
         # TurnState and cannot reach this — it read a document out loud, which is not an action to
         # confirm.
-        if turn_state is not None and confirm.needs_confirmation(turn_state):
-            print("  [confirmation required — listening for yes/no]", flush=True)
-            yn_cap = vad.listen(announce=False)
-            if yn_cap is None:
-                print("  nothing heard — treating as cancel")
-                yn_response = "no"
-            else:
-                with turn.stage("stt"):
-                    yn_transcript = arms.stt(yn_cap.segment, chosen["stt"].id,
-                                             turn_id=turn_id, on_fallback=turn.fallback)
-                yn_response = confirm.classify_response(yn_transcript)
-                print(f"  confirmation response: {yn_transcript!r} -> {yn_response}")
-
-            if yn_response == "yes":
-                print("  confirmed — action would proceed here")
-            elif yn_response == "no":
-                cancel_text = confirm.cancelled_reply()
-                with turn.stage("tts"):
-                    cancel_speech = arms.tts(cancel_text, chosen["tts"].id,
-                                             turn_id=turn_id, on_fallback=turn.fallback)
-                audio.play(cancel_speech.audio, sample_rate=cancel_speech.sample_rate)
-                print(f"  cancelled: {cancel_text!r}")
-            else:
-                unclear_text = confirm.unclear_reply()
-                with turn.stage("tts"):
-                    unclear_speech = arms.tts(unclear_text, chosen["tts"].id,
-                                              turn_id=turn_id, on_fallback=turn.fallback)
-                audio.play(unclear_speech.audio, sample_rate=unclear_speech.sample_rate)
-                print(f"  unclear: {unclear_text!r}")
+        if turn_state is not None:
+            confirmation_leg(turn, turn_id, chosen, turn_state)
 
     # A watched turn's record closes only once the *next* utterance has been endpointed, because one
     # listener spans both. So this line, and the turn's `ts`, land after the user has spoken again.
@@ -359,6 +410,9 @@ def report(rec):
 
 
 def main():
+    # Before anything prints: a turn prints a transcript and a reply, neither of which this process
+    # chooses the characters of. See config.utf8_console().
+    utf8_console()
     ap = argparse.ArgumentParser(description="VOX — chained turns with barge-in (VOX-002, VOX-011)")
     length = ap.add_mutually_exclusive_group()
     length.add_argument("--turns", type=int, default=None,

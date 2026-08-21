@@ -74,6 +74,35 @@ def no_env_override(monkeypatch):
         monkeypatch.delenv(env, raising=False)
 
 
+# The code defaults, as `src/config.py` writes them — the second argument to each `os.environ.get`.
+# Duplicated here on purpose: the whole point is a value the environment cannot reach, so it cannot
+# be read back out of a module that already read the environment. `test_session.py` has a test that
+# fails if these two places disagree.
+SESSION_DEFAULTS = {"SESSION_MINUTES": 3.0, "SESSION_QUIET_LIMIT": 2}
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_tunables(monkeypatch):
+    """A VOX_* tunable in `.env` must not change what a unit test measures.
+
+    `no_env_override` above does this for the model names by deleting the variables, which works
+    because arms are resolved per call. It cannot work for these: `config.py` reads them once at
+    import, into module constants that `src/loop.py` then imports by name — so by the time a fixture
+    runs, `VOX_SESSION_QUIET_LIMIT=1` is already two constants deep and deleting the variable
+    changes nothing.
+
+    Not hypothetical. `.env` on the demo machine carries a demo profile (`VOX_SESSION_QUIET_LIMIT=1`
+    so one silent listen ends a session instead of two, for a demo where a muted headset would
+    otherwise cost a minute of dead air), and it failed three tests in this file — a suite whose
+    result depended on whose machine it ran on. `.env` is gitignored and per-machine and the profile
+    is correct; a test that only passes without one is the bug.
+    """
+    from src import loop                    # imported here: this file must not need the mic modules
+    for name, default in SESSION_DEFAULTS.items():
+        monkeypatch.setattr(config, name, default)
+        monkeypatch.setattr(loop, name, default)
+
+
 @pytest.fixture(autouse=True)
 def chunks_file(tmp_path, monkeypatch):
     """Never read the real runs/chunks.jsonl from a test.

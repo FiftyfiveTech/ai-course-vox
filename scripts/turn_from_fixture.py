@@ -25,12 +25,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import answer as answer_mod, arms, harness, vad                  # noqa: E402
-from src.config import SAMPLE_RATE                                        # noqa: E402
+from src.config import SAMPLE_RATE, utf8_console                          # noqa: E402
 from src.loop import grounding, report                                    # noqa: E402
 from src.telemetry import TURNS_LOG                                       # noqa: E402
 
 
 def main():
+    utf8_console()                # a transcript can carry a character cp1252 cannot encode
     ap = argparse.ArgumentParser(description="One chained turn driven from a recording (VOX-003)")
     ap.add_argument("recording", type=Path, nargs="?",
                     default=Path("tests/fixtures/hello_testing_voice.mp3"))

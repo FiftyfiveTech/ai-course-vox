@@ -10,6 +10,7 @@ VOX-003 measured. `resolve()` is the only way code reaches an arm; `src/arms.py`
 caller.
 """
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -491,3 +492,28 @@ CONSENT_NOTICE = (
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "
     "speak customer PII. Ctrl-C to abort."
 )
+
+
+def utf8_console():
+    """Make this process's stdout and stderr encode anything. Call it from an entry point.
+
+    A function and not an import-time side effect, because a library import has no business
+    rewriting the caller's streams — pytest replaces both with objects of its own, and a `make demo`
+    piped into `tee` is a different stream again.
+
+    The reason it exists is a turn that died: a Windows console encodes to cp1252 unless something
+    has changed it, `print` raises `UnicodeEncodeError` rather than dropping a character it cannot
+    map, and a turn prints two things it does not control — the transcript and the reply. A single
+    non-cp1252 character out of Whisper or the model therefore kills the turn *after* every stage
+    has succeeded, and it does it at the console, where no fallback and no retry can see it. The
+    VOX-026 dry run hit the same failure on a character the repo *does* control (a box-drawing dash
+    in VOX-011's barge-in line, since replaced); the general case is not fixable by choosing nicer
+    glyphs, only by saying what the stream encodes.
+
+    `errors="replace"` rather than the default: a demo losing one character to a `?` is nothing, and
+    losing the turn is the thing this whole ticket is about.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # Absent under pytest's capture and on any stream that is not a TextIOWrapper.
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
