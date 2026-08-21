@@ -26,7 +26,8 @@ when the remote one fails in a way another arm could survive. See `_call`.
 import sys
 from collections import namedtuple
 
-from src import cooldown, embeddings as embed_mod, errors, nlu, stt as stt_mod, tts as tts_mod
+from src import (cooldown, embeddings as embed_mod, errors, nlu, stt as stt_mod,
+                 tts as tts_mod, vocab_bias)
 from src.config import (ARMS, DEFAULT_COOLDOWN_S, FALLBACKS, SAMPLE_RATE, STT_LANGUAGE,
                         resolve)
 from src.telemetry import log_call
@@ -168,13 +169,20 @@ def _dispatch(stage, arm, payload, turn_id, extra, sink=None, options=None):
     carries the same number that reached calls.jsonl. One measurement, two readers.
     """
     fn = _backend(stage, arm)
-    with log_call(stage, arm, turn_id, **extra) as rec:
+    # `prompt` is an STT-only kwarg; strip it from the logging dict and pass directly to the backend.
+    backend_kw = {}
+    log_extra = dict(extra)
+    if "prompt" in log_extra:
+        backend_kw["prompt"] = log_extra.pop("prompt")
+    with log_call(stage, arm, turn_id, **log_extra) as rec:
         if sink is not None:
             sink.append(rec)
         # `options` are call parameters the *backend* takes (a temperature, a timeout), as opposed
         # to `extra`, which are facts about the call for the log. They are kept apart because they
         # travel in opposite directions: one goes to the provider, the other to calls.jsonl.
-        return fn(arm, payload, rec, **(options or {}))
+        # `backend_kw` is the same kind of parameter arriving the other way round: callers pass
+        # `prompt` in with `extra`, and it is split back out above.
+        return fn(arm, payload, rec, **backend_kw, **(options or {}))
 
 
 def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, options=None, **extra):
@@ -235,8 +243,12 @@ def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, 
 
 def stt(audio, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     """-> transcript text. Raises on a provider error rather than returning a plausible blank."""
+    extra = {"audio_s": round(len(audio) / SAMPLE_RATE, 3), "language": STT_LANGUAGE}
+    bias = vocab_bias.prompt_if_enabled()
+    if bias:
+        extra["prompt"] = bias
     result, _arm = _call("stt", resolve("stt", model_id), audio, turn_id, on_fallback, fallback,
-                         audio_s=round(len(audio) / SAMPLE_RATE, 3), language=STT_LANGUAGE)
+                         **extra)
     return result
 
 
