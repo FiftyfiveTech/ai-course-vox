@@ -3,6 +3,7 @@
     stt(audio, model_id)  -> transcript
     llm(msgs,  model_id)  -> reply text
     tts(text,  model_id)  -> Speech(audio, sample_rate)
+    embed(texts, model_id) -> (n, dim) unit vectors
 
 `model_id` is a Hugging Face repo id — `openai/whisper-base`, or `repo/id@provider` when two
 providers serve the same weights, or the short alias for typing at a prompt. None means the stage
@@ -25,7 +26,8 @@ when the remote one fails in a way another arm could survive. See `_call`.
 import sys
 from collections import namedtuple
 
-from src import cooldown, errors, nlu, stt as stt_mod, tts as tts_mod, vocab_bias
+from src import (cooldown, embeddings as embed_mod, errors, nlu, stt as stt_mod,
+                 tts as tts_mod, vocab_bias)
 from src.config import (ARMS, DEFAULT_COOLDOWN_S, FALLBACKS, SAMPLE_RATE, STT_LANGUAGE,
                         resolve)
 from src.telemetry import log_call
@@ -34,7 +36,7 @@ from src.telemetry import log_call
 # instead of leaving the speaker to assume one.
 Speech = namedtuple("Speech", "audio sample_rate")
 
-_MODULES = {"stt": stt_mod, "llm": nlu, "tts": tts_mod}
+_MODULES = {"stt": stt_mod, "llm": nlu, "tts": tts_mod, "embed": embed_mod}
 
 
 def available(stage=None):
@@ -87,13 +89,13 @@ def describe(chosen):
     phase gate all have to say the same thing. They had a copy each, which is one copy per chance
     for the gate to describe a pipeline the loop does not actually run.
     """
-    lines = [f"  {'vad':<4} snakers4/silero-vad  (local, silero)"]
+    lines = [f"  {'vad':<5} snakers4/silero-vad  (local, silero)"]
     for stage, arm in chosen.items():
         where = "local" if arm.local else f"remote via {arm.provider}"
-        lines.append(f"  {stage:<4} {arm.repo_id}  ({where}, {arm.backend})")
+        lines.append(f"  {stage:<5} {arm.repo_id}  ({where}, {arm.backend})")
         fb = fallback_for(stage, arm)
         if fb is not None:
-            lines.append(f"  {'':<4}   fallback -> {fb.repo_id} (local, {fb.backend})")
+            lines.append(f"  {'':<5}   fallback -> {fb.repo_id} (local, {fb.backend})")
     return "\n".join(lines)
 
 
@@ -158,7 +160,7 @@ def fallback_for(stage, arm, enabled=True):
     return None if fb.id == arm.id else fb
 
 
-def _dispatch(stage, arm, payload, turn_id, extra, sink=None):
+def _dispatch(stage, arm, payload, turn_id, extra, sink=None, options=None):
     """Run one arm through the logger. `sink` receives the call record, failure included.
 
     The record is handed out rather than returned because on a failure there is no return — and the
@@ -175,10 +177,15 @@ def _dispatch(stage, arm, payload, turn_id, extra, sink=None):
     with log_call(stage, arm, turn_id, **log_extra) as rec:
         if sink is not None:
             sink.append(rec)
-        return fn(arm, payload, rec, **backend_kw)
+        # `options` are call parameters the *backend* takes (a temperature, a timeout), as opposed
+        # to `extra`, which are facts about the call for the log. They are kept apart because they
+        # travel in opposite directions: one goes to the provider, the other to calls.jsonl.
+        # `backend_kw` is the same kind of parameter arriving the other way round: callers pass
+        # `prompt` in with `extra`, and it is split back out above.
+        return fn(arm, payload, rec, **backend_kw, **(options or {}))
 
 
-def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra):
+def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, options=None, **extra):
     """Run `arm`; on a transient failure run the stage's local arm instead.
 
     -> (result, the arm that actually produced it). Callers need the second value because an arm is
@@ -201,11 +208,11 @@ def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra
     if parked and fb is not None:
         reason = f"{arm.id} is rate-limited for another {parked:g}s"
         return _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback,
-                             reason, None, None)
+                             reason, None, None, options)
 
     attempt = []
     try:
-        return _dispatch(stage, arm, payload, turn_id, extra, attempt), arm
+        return _dispatch(stage, arm, payload, turn_id, extra, attempt, options), arm
     except Exception as e:
         if fb is None or not errors.is_transient(e):
             raise
@@ -213,10 +220,11 @@ def _call(stage, arm, payload, turn_id, on_fallback=None, fallback=True, **extra
             cooldown.block(arm, e.retry_after or DEFAULT_COOLDOWN_S)
         failed_ms = attempt[0].get("latency_ms") if attempt else None
         return _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback,
-                             f"{type(e).__name__}: {e}", failed_ms, e)
+                             f"{type(e).__name__}: {e}", failed_ms, e, options)
 
 
-def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, failed_ms, original):
+def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, failed_ms,
+                  original, options=None):
     """Run `fb` in place of `arm`, loudly. -> (result, fb)."""
     print(f"{stage.upper()} FALLBACK — {reason}\n"
           f"  running {fb.repo_id} ({fb.provider}) locally instead of {arm.repo_id}.",
@@ -224,7 +232,8 @@ def _run_fallback(stage, arm, fb, payload, turn_id, extra, on_fallback, reason, 
     if on_fallback is not None:
         on_fallback(stage, arm, fb, reason, failed_ms)
     try:
-        result = _dispatch(stage, fb, payload, turn_id, {**extra, "fallback_for": arm.id})
+        result = _dispatch(stage, fb, payload, turn_id, {**extra, "fallback_for": arm.id},
+                           options=options)
     except Exception as fb_error:
         if original is None:
             raise
@@ -243,10 +252,19 @@ def stt(audio, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     return result
 
 
-def llm(msgs, model_id=None, *, turn_id, on_fallback=None, fallback=True, **extra):
-    """-> the assistant's reply. `msgs` is an OpenAI-shaped message list; see nlu.messages()."""
+def llm(msgs, model_id=None, *, turn_id, on_fallback=None, fallback=True, temperature=None,
+        **extra):
+    """-> the assistant's reply. `msgs` is an OpenAI-shaped message list; see nlu.messages().
+
+    `temperature` reaches the backend rather than the log: a grounded answer asks for 0 and a spoken
+    reply keeps nlu.TEMPERATURE. It is also recorded, because two turns sampled differently are not
+    comparable and a latency table has no way to know.
+    """
+    options = {} if temperature is None else {"temperature": temperature}
     result, _arm = _call("llm", resolve("llm", model_id), msgs, turn_id, on_fallback, fallback,
-                         messages=len(msgs), **extra)
+                         options=options, messages=len(msgs),
+                         temperature=nlu.TEMPERATURE if temperature is None else temperature,
+                         **extra)
     return result
 
 
@@ -260,3 +278,23 @@ def tts(text, model_id=None, *, turn_id, on_fallback=None, fallback=True):
     audio, ran = _call("tts", arm, text, turn_id, on_fallback, fallback,
                        chars=len(text), sample_rate=arm.extra["sample_rate"])
     return Speech(audio, ran.extra["sample_rate"])
+
+
+def embed(texts, model_id=None, *, turn_id, is_query=False, fallback=False, **extra):
+    """-> (n, dim) float32 unit vectors for `texts`, from the named encoder or the stage default.
+
+    `fallback` defaults to **False**, which is the opposite of every other arm here, and it is not
+    an oversight: an encoder's output only means anything against vectors from the same encoder. A
+    substitution would answer the query in one vector space and compare it against a cached index
+    built in another, and every cosine that came out would be arithmetic between unrelated bases —
+    silently, since a meaningless cosine is still a number between -1 and 1. `config.FALLBACKS` has
+    no `embed` entry for the same reason; this argument exists only so the signature does not lie
+    about what `_call` supports.
+
+    `is_query=True` prepends the arm's query instruction for an asymmetric encoder. Chunks are
+    encoded without it. See src/embeddings.py.
+    """
+    arm = resolve("embed", model_id)
+    payload = {"texts": texts, "is_query": is_query}
+    result, _ran = _call("embed", arm, payload, turn_id, None, fallback, **extra)
+    return result

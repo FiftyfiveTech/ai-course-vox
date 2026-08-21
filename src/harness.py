@@ -21,13 +21,18 @@ import soundfile as sf
 import torch
 import torchaudio
 
-from src import arms, audio as audio_out, nlu, vad
+from src import answer as answer_mod, arms, audio as audio_out, vad
 from src.config import SAMPLE_RATE
 from src.telemetry import new_turn_id, turn_timer
 
 # What one fixture turn produced. `record` is the line that reached runs/turns.jsonl — the same
 # object, not a copy of the numbers, so nothing printed can drift from what was logged.
-TurnRun = namedtuple("TurnRun", "record turn_id capture transcript reply speech")
+#
+# `reply` is the text that was spoken either way; `answer` is the VOX-031 Answer when the turn took
+# the grounded path and None when it took the plain one, so a caller can see which ran without
+# re-deriving it. Appended last with a default, so every existing positional caller is unaffected.
+TurnRun = namedtuple("TurnRun", "record turn_id capture transcript reply speech answer")
+TurnRun.__new__.__defaults__ = (None,)
 
 
 class NoSpeech(RuntimeError):
@@ -48,7 +53,7 @@ def load_16k_mono(path):
 
 
 def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=None, echo=None,
-                 segment=None):
+                 segment=None, idx=None):
     """Run one turn on `clip` with the arms in `chosen`. -> TurnRun.
 
     `chosen` maps stage -> Arm, exactly as `arms.select()` returns it.
@@ -65,6 +70,12 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
     `on_fallback` defaults to the turn's own `TurnTimer.fallback`, not to nothing. A fallback that
     does not reach the record leaves `<stage>_model` naming an arm that never ran, and every
     per-turn comparison reads exactly that field — so the default has to be the loud one.
+
+    `idx` is a retrieval index, and passing one turns this turn's reply into the grounded path when
+    the documents cover what was said (VOX-032). It defaults to None — *not* to the process-wide
+    index — because the callers here measure things: `scripts/compare_arms.py` is comparing arms and
+    a grounded turn carries ~1500 extra tokens of context, which would land in the llm column as if
+    the arm were slower. A caller that wants the grounded path says so.
 
     `segment` skips endpointing and runs on an already-endpointed `Capture`.
 
@@ -109,9 +120,14 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
                     f"{chosen['stt'].id} returned an empty transcript for {source} — not calling "
                     f"the LLM.")
 
-            with turn.stage("llm"):
-                reply = nlu.reply(transcript, turn_id, model_id=chosen["llm"].id,
-                                  on_fallback=notify, fallback=fallback)
+            # The same routing the live loop runs, from the same function (VOX-032) — a second copy
+            # here is exactly how a fixture-driven comparison ends up timing a pipeline `make demo`
+            # does not. `idx=None` is the default, so nothing that was not handed a knowledge base
+            # changes behaviour: `scripts/compare_arms.py` still times the plain reply path.
+            answered = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
+                                             model_id=chosen["llm"].id, on_fallback=notify,
+                                             fallback=fallback)
+            reply = answered.text
             say(f"vox says : {reply!r}")
 
             with turn.stage("tts"):
@@ -131,4 +147,4 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
         e.turn_id = turn_id
         raise
 
-    return TurnRun(turn.written, turn_id, cap, transcript, reply, speech)
+    return TurnRun(turn.written, turn_id, cap, transcript, reply, speech, answered.answer)

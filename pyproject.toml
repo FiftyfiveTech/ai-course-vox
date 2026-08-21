@@ -31,6 +31,11 @@ dependencies = [
     # embedding out of a dataset repo's zip, and an undeclared transitive dep is a trap.
     "huggingface-hub>=0.23",
     "pypdf>=6.16.1",
+    # Arrives with kokoro, but three modules now import it directly — src/stt.py (the local whisper
+    # arm), src/tts.py (speecht5) and src/embeddings.py (the sentence encoder behind the dense half
+    # of retrieval). An undeclared transitive dep is a trap, and this one is now load-bearing for
+    # retrieval quality rather than only for an optional arm.
+    "transformers>=4.44",
     # VOX-030's Okapi BM25 scorer. Pure Python over the numpy above, so retrieval has no network at
     # query time; a scorer and not a model, so the HF-repo-id rule does not apply to it any more
     # than it does to pypdf.

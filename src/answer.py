@@ -9,8 +9,9 @@ That is the whole reason the POC routes through `arms.llm` instead of calling ht
 
 Four decisions worth knowing before reading the code:
 
-**A floor-miss never reaches the model.** `retrieval.retrieve()` returning `[]` means no chunk
-cleared `config.RETRIEVAL_SCORE_FLOOR` — there is nothing to be grounded *in*, so there is nothing
+**A floor-miss never reaches the model.** `retrieval.retrieve()` returning `[]` means no chunk was
+vouched for by either half of retrieval — neither `config.RETRIEVAL_SCORE_FLOOR` nor
+`config.DENSE_SCORE_FLOOR` — so there is nothing to be grounded *in*, so there is nothing
 for a model to do but invent. `answer()` returns `REFUSAL` with an empty source list and makes no
 call at all: no token spend, no round-trip, and no path on which a hallucination is even possible.
 It also means the refusal is testable without a key, which is what lets VOX-033's gate measure a
@@ -21,9 +22,15 @@ well because they come from the document that *ought* to answer the question, an
 the answer. "Is there a canteen subsidy" scoring 0.23 is a floor's job; the attendance policy
 mentioning working days without mentioning lunch is a prompt's job.
 
-**There is one refusal sentence, not two.** `REFUSAL` is the literal string in
-`prompts/answer_from_source_v1.md`, and `tests/unit/test_answer.py` asserts it appears there
-verbatim. If the deterministic refusal and the model's refusal were worded differently, a caller
+That division of labour carries more weight since retrieval grew a dense half, and the shift is
+measured: the dense cosine does not separate answerable questions from absent ones on the dev set
+(see `config.DENSE_SCORE_FLOOR`), so four of six absent dev queries now reach the model instead of
+being refused arithmetically. They are refused here, by the prompt, which is why the prompt is
+versioned and measured rather than assumed.
+
+**There is one refusal sentence, not two.** `REFUSAL` is the literal string in `PROMPT_FILE`
+(currently `prompts/answer_from_source_v2.md`), and `tests/unit/test_answer.py` asserts it appears
+there verbatim. If the deterministic refusal and the model's refusal were worded differently, a caller
 could tell which path ran — and "the score floor rejected this" is an implementation detail of
 retrieval, not something a person asking about leave should hear the shape of.
 
@@ -45,14 +52,27 @@ documents next to it would be a claim that they support an answer that was not g
 normalised equality against one constant string, not a parser: punctuation and case are ignored,
 anything else is treated as an answer. That direction is deliberate — a near-miss keeps its
 citations, which is safer than silently dropping the provenance off a reply that did answer.
+
+`turn_reply()` at the bottom is VOX-032: the same two paths as seen from inside a spoken turn —
+retrieve, and route to `answer()` or to the plain reply on what comes back (`nlu.reply` unless the
+caller supplies its own; the live loop supplies VOX-019's `state.build`). It lives here
+rather than in `src/loop.py` because the mic loop and the recording harness both need it and a
+second copy of the routing is how the two quietly stop running the same pipeline.
 """
 import re
+import sys
 from collections import namedtuple
+from contextlib import contextmanager
 
 from src import nlu, retrieval
 from src.config import PROMPTS_DIR
 
-PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v1.md"
+# v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
+# answered "you will be paid 12,000" to a leave-encashment question whose excerpt gave a formula and
+# no such number — cited, fluent and wrong. Versioned as a new file rather than edited in place
+# (VOX-018): the old prompt is what the numbers in ARCHITECTURE.md were measured against, and a
+# prompt you can no longer read is a measurement you can no longer reproduce.
+PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v2.md"
 
 # The one refusal, shared by the two paths that can produce it: this module when no chunk clears the
 # floor, and the model when the chunks that did clear it do not contain the answer. Written out
@@ -62,6 +82,16 @@ REFUSAL = "I could not find that in the policy documents I have."
 # How the excerpts are introduced in the user message. Named so a test can assert the context really
 # reached the model rather than only that a call happened.
 CONTEXT_HEADER = "Excerpts from the policy documents:"
+
+# Sampling for the grounded path. Zero, where the spoken-reply path uses nlu.TEMPERATURE = 0.3.
+#
+# Measured, 2026-08-20: the same leave-encashment question asked three times at 0.3 returned two
+# correct refusals and one invented figure ("you will get 12 rupees"). A prompt cannot fix that,
+# because nothing was wrong with the prompt on the two runs where it worked — the answer was being
+# sampled from a distribution that includes the bad one. There is nothing for temperature to buy
+# here anyway: reading five policy excerpts is not a task where variety is a feature, and a gate
+# that cannot reproduce its own number is not a gate.
+ANSWER_TEMPERATURE = 0.0
 
 
 class Answer(namedtuple("Answer", "text sources hits grounded")):
@@ -150,6 +180,101 @@ def is_refusal(text):
     return _normalise(text) == _REFUSAL_NORM
 
 
+# --- the numeric guard --------------------------------------------------------------------------
+# `answer_from_source_v2.md` ends its rule with "Numbers you may say are the ones written in the
+# excerpts". Everything below is that sentence enforced in code, because asking was measured and it
+# is not enough: at temperature 0.3 the same leave-encashment question produced "you will get 12
+# rupees" one run in three, and at temperature 0 it produced a four-sentence answer built on
+# "you have 20 privileged leave, which is more than the 24 days allowed". Both are fluent, both
+# carry citations, and neither number came from a document.
+#
+# The rule is deliberately about the *excerpts* and not the conversation. A figure the person
+# themselves supplied is exactly what a fabricated calculation is built out of, so echoing it back
+# inside an answer is the shape of the failure rather than an innocent restatement.
+
+_DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+_UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+          "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+          "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+          "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+          "seventy": 70, "eighty": 80, "ninety": 90,
+          # Ordinals, because the prompt asks for dates the way a person says them — "the
+          # fourteenth of April" has to match a "14" in the excerpt or every date answer refuses.
+          "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7,
+          "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
+          "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
+          "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
+_SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
+           "million": 1_000_000, "crore": 10_000_000, "crores": 10_000_000}
+_NUMBER_WORD = re.compile(r"[a-z]+")
+
+
+def numbers_in(text, parts=False):
+    """-> the set of numeric values `text` states, digits and words alike.
+
+    "twenty-five thousand" and "25,000" both come out as 25000, because the prompt asks the model to
+    say numbers the way a person does while the excerpts are written the way a document does. A
+    guard comparing surface forms would refuse every correct answer it was ever given.
+
+    `parts` is the asymmetry that makes this usable. Off (the answer side) a word phrase yields only
+    what it means: "twenty-five thousand" is 25000 and nothing else, so the reply is held to the
+    figures it actually asserts. On (the excerpt side) the pieces come too — 25, 5, 20, 1000 — so an
+    excerpt written "25 thousand", or one that happens to spell a component, still counts as having
+    said it. Being generous about what a document contains and strict about what a reply claims is
+    the safe direction: the guard then only ever fires on a number that appears nowhere at all.
+    """
+    found = set()
+    for raw in _DIGITS.findall(text or ""):
+        try:
+            found.add(float(raw.replace(",", "")))
+        except ValueError:
+            continue
+
+    words = _NUMBER_WORD.findall((text or "").lower().replace("-", " "))
+    total = current = 0.0
+    running = False
+
+    def flush():
+        nonlocal total, current, running
+        if running and (total or current):
+            found.add(total + current)
+        total = current = 0.0
+        running = False
+
+    for w in words:
+        if w in _UNITS:
+            current += _UNITS[w]
+            running = True
+            if parts:
+                found.add(float(_UNITS[w]))
+        elif w in _SCALES and running:
+            current = max(current, 1.0) * _SCALES[w]
+            total += current
+            if parts:
+                found.add(current)
+            current = 0.0
+        elif w == "and" and running:
+            continue
+        else:
+            flush()
+    flush()
+    return found
+
+
+def ungrounded_numbers(text, hits):
+    """-> sorted values stated in `text` that appear in none of the excerpts.
+
+    Empty is the good case. A non-empty list means the reply asserts a figure that is not in the
+    documents it cites — invented, or worse, calculated, which is the version that sounds most like
+    a right answer.
+    """
+    context = set()
+    for h in hits:
+        context |= numbers_in(h.text, parts=True)
+    return sorted(numbers_in(text) - context)
+
+
 def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
            model_id=None, on_fallback=None, fallback=True):
     """-> Answer for `transcript`, grounded in the retrieved chunks. Never raises on a miss.
@@ -163,7 +288,7 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     which is the behaviour VOX-006 chose and this ticket does not get to soften.
     """
     if hits is None:
-        hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx)
+        hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
 
     if not hits:
         # No model call: see the module docstring. Nothing cleared the floor, so there is no context
@@ -173,7 +298,7 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     from src import arms                      # imported here: arms imports nlu, which this imports
     text = arms.llm(
         messages(transcript, hits), model_id, turn_id=turn_id,
-        on_fallback=on_fallback, fallback=fallback,
+        on_fallback=on_fallback, fallback=fallback, temperature=ANSWER_TEMPERATURE,
         prompt_file=PROMPT_FILE.name, transcript_chars=len(transcript),
         chunks=len(hits), sources=[h.source for h in hits],
         top_score=round(hits[0].score, 4),
@@ -181,4 +306,126 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
 
     if is_refusal(text):
         return Answer(REFUSAL, [], hits, grounded=False)
+
+    # The numeric guard. A figure that is in no excerpt makes this reply ungrounded whatever else it
+    # says, so it becomes the same refusal a listener would have heard if retrieval had missed —
+    # they are not owed the distinction, and the alternative is a confident wrong number about their
+    # own salary. Recorded on the call record so the rate is visible in runs/calls.jsonl rather than
+    # only in whatever the caller decided to print.
+    invented = ungrounded_numbers(text, hits)
+    if invented:
+        print(f"UNGROUNDED NUMBER — {arms_repr(invented)} appears in no excerpt; refusing instead "
+              f"of speaking it.\n  suppressed reply: {' '.join(text.split())}", file=sys.stderr)
+        return Answer(REFUSAL, [], hits, grounded=False)
+
     return Answer(text, cited(hits), hits, grounded=True)
+
+
+def arms_repr(values):
+    """-> "12, 4" — the invented figures, as a person would read them in a log line."""
+    return ", ".join(f"{v:g}" for v in values)
+
+
+# --- inside a turn (VOX-032) -------------------------------------------------------------------
+
+# What the reply stage of one turn produced. `answer` is the Answer on the grounded path and None
+# on the plain one, so a caller can tell *which path ran* without re-deriving it from `hits` —
+# and `text` is what goes to TTS either way, which is the only thing the speaker needs to know.
+Reply = namedtuple("Reply", "text answer hits")
+
+
+def knowledge_base(echo=print):
+    """-> the process-wide retrieval index, or None if this machine has nothing indexed.
+
+    Called once at startup, not per turn: building the index is per-process work (see
+    retrieval.index()), and a build inside the first turn would land in a stage number and make
+    the latency split a lie.
+
+    None is a supported state, not an error. `sources/` is gitignored — internal HR policies — so a
+    clean clone has no corpus and no chunk file, and `make demo` still has to run for whoever is
+    standing in front of it. What must not happen is that state being *silent*: a demo that quietly
+    stopped being grounded because nobody ran `make index` looks exactly like one where retrieval
+    found nothing, and only one of the two is a working system. So the reason is printed here,
+    once, and every turn afterwards says nothing.
+    """
+    try:
+        idx = retrieval.index()
+    except RuntimeError as e:
+        echo(f"no knowledge base: {e}\n"
+             f"  turns will answer from the plain reply prompt — nothing will be grounded.")
+        return None
+    echo(f"knowledge base: {len(idx)} chunks over {len(idx.doc_ids)} documents "
+         f"({', '.join(idx.doc_ids[:4])}{', …' if len(idx.doc_ids) > 4 else ''})")
+    return idx
+
+
+def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallback=None,
+               fallback=True, k=None, floor=None, plain=None):
+    """One turn's reply: grounded in the documents when they cover the question, plain when not.
+
+    -> Reply(text, answer, hits). The whole of VOX-032's routing decision, in one place because
+    `src/loop.py` and `src/harness.fixture_turn` both need it and a second copy is how a
+    comparison ends up timing a pipeline the live loop does not run.
+
+    The decision is retrieval's, not a classifier's: chunks that clear `RETRIEVAL_SCORE_FLOOR` go
+    to `answer()`, an empty list goes to `nlu.reply()` exactly as every turn did before this
+    ticket. The floor was measured (`scripts/ask.py --calibrate`), which is the reason it gets to
+    be the router — an intent model in front of it would be a second, unmeasured decision, and it
+    would fail in the expensive direction: a misrouted greeting costs a plain reply, a misrouted
+    "how much casual leave" costs an invented policy number.
+
+    `idx=None` means this machine has no knowledge base (see `knowledge_base()`) and skips
+    retrieval altogether — that is not the same as retrieval returning nothing, and the two are
+    distinguishable on the turn record: `t_retrieval_ms` is absent in the first case and measured
+    in the second.
+
+    `turn` is the TurnTimer. Retrieval is timed on it outside the llm stage, and the grounding is
+    stamped on it — both so a turn line can be read afterwards without guessing which path it took.
+    Left as None (a caller with no turn record, i.e. a test) nothing is timed and the routing is
+    unchanged.
+
+    `plain` replaces what the un-retrieved path calls, with the same signature as `nlu.reply` and
+    the same job: transcript in, spoken text out. It exists because VOX-019 gave the live loop a
+    second thing to want from that call — the structured TurnState that VOX-020's confirmation gate
+    reads — and the alternative was either a second LLM call per turn or a copy of this routing
+    inside `src/loop.py`. The routing itself is not negotiable by a caller: what retrieval vouched
+    for still goes to the grounded prompt, whatever `plain` is.
+    """
+    hits = []
+    if idx is not None:
+        with _timing(turn, "retrieval"):
+            # turn_id goes down into retrieval because the dense half makes a model call now: the
+            # query encoding is a line in runs/calls.jsonl, and a line with a null turn_id joins to
+            # nothing, which is the one thing the two-log design exists to prevent.
+            hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
+
+    with _timing(turn, "llm"):
+        if hits:
+            got = answer(transcript, turn_id, hits=hits, model_id=model_id,
+                         on_fallback=on_fallback, fallback=fallback)
+            text = got.text
+        else:
+            # Nothing cleared the floor, or there is no corpus at all. Either way there is nothing
+            # to be grounded in, so the turn behaves as it did before this ticket existed.
+            got = None
+            text = (plain or nlu.reply)(transcript, turn_id, model_id=model_id,
+                                        on_fallback=on_fallback, fallback=fallback)
+
+    if turn is not None:
+        turn.grounding(hits, grounded=bool(got and got.grounded),
+                       sources=got.labels if got else [])
+    return Reply(text, got, hits)
+
+
+@contextmanager
+def _timing(turn, what):
+    """Time `what` on `turn` if there is one. `retrieval` is a turn field, `llm` a stage — see
+    TurnTimer.retrieval() on why the two are recorded differently."""
+    if turn is None:
+        yield
+    elif what == "retrieval":
+        with turn.retrieval():
+            yield
+    else:
+        with turn.stage(what):
+            yield

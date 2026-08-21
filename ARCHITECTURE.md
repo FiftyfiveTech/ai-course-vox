@@ -255,11 +255,13 @@ What `abort()` cannot recall is the output device's own buffer — 0.182 s on th
 device, which is larger than the stop latency itself. So the printed number is when VOX stopped
 *sending*, and `out_latency_s` is logged beside it as the tail that can still be heard.
 
-Barge-in needs a turn after the one being interrupted, so `--turns 2` or more switches it on. The
-last turn of a run is played blocking, which keeps `make demo`'s default single turn exactly as
-VOX-002 and VOX-003 measured it. One consequence worth knowing when reading the logs: a watched
-turn's record closes only once the *next* utterance has been endpointed, because one listener spans
-both — so its `ts` and its printed latency line land after the user has spoken again.
+Barge-in needs a turn after the one being interrupted, so it is on for every reply that has one.
+In a timed session — `--minutes`, which is what `make demo` runs — that is every reply until the
+clock runs out; with `--turns N` it is every reply but the last, and a bare single turn is played
+blocking, exactly as VOX-002 and VOX-003 measured it. One consequence worth knowing when reading
+the logs: a watched turn's record closes only once the *next* utterance has been endpointed,
+because one listener spans both — so its `ts` and its printed latency line land after the user has
+spoken again.
 
 ---
 
@@ -299,17 +301,22 @@ src/
   nlu.py           — the openai-chat backend + the message assembly arms.llm() takes, and
                      load_prompt(), shared by both prompt files; extraction lands in VOX-019
   audio.py         — speaker playback, kept apart from synthesis so VOX-011 can interrupt it
-  loop.py          — one chained turn; `make demo`
+  loop.py          — chained turns, bounded by a count or by the session clock; `make demo`.
+                     Routes through retrieval after STT (VOX-032)
   confirm.py       — confirmation flow logic (VOX-020, not yet written)
   actions.py       — tool/API calls (read and write) (not yet written)
   tts.py           — TTS backends: kokoro, speecht5, piper
   harness.py       — one chained turn driven from a recording, shared by
                      scripts/turn_from_fixture.py and scripts/compare_arms.py
   sources.py       — PDF corpus -> text chunks with (doc_id, page) provenance (VOX-029)
-  retrieval.py     — BM25 over those chunks; top-k with provenance and a score floor (VOX-030).
-                     The one stage with no provider, so the only one that writes no cost log line
+  retrieval.py     — BM25 over those chunks fused with a dense encoder; top-k with provenance and
+                     two floors (VOX-030 + hybrid). No longer the one stage without a cost line:
+                     the lexical half is arithmetic, the dense half is a model call
+  embeddings.py    — the sentence encoder behind that dense half. A stage module like stt/tts:
+                     BACKENDS + LOADERS, arms named by HF repo id, `--embed` picks one
   answer.py        — those chunks -> a spoken answer with its doc:page, through arms.llm
-                     (VOX-031). A floor miss refuses here without calling any model
+                     (VOX-031). A floor miss refuses here without calling any model.
+                     `turn_reply()` is the grounded-or-plain routing both turn loops run (VOX-032)
 
 sources/           — the PDF corpus. Gitignored: internal HR policies (see below)
 
@@ -556,6 +563,11 @@ tokens, mean 50, never 0.
 
 ## Lexical retrieval (POC, VOX-030)
 
+> This describes the lexical half on its own, which is what VOX-030 built and what
+> `VOX_HYBRID_RETRIEVAL=0` still runs. A dense half was added after a live turn showed what
+> term matching cannot do — see **§ Hybrid retrieval** below. The floor and the numbers here
+> are unchanged and still the ones the lexical half is calibrated on.
+
 Question in, top 5 chunks out with the provenance VOX-029 wrote — `make ask Q="..."`. Okapi BM25
 via `rank_bm25`, no embeddings, no model, no network, no key.
 
@@ -670,6 +682,289 @@ fallback does not: **72.6 s** against 0.94 s remote, on the same question and th
 plain-reply fallback was tolerable because its prompt was small; on the grounded path a rate limit
 does not cost the turn's quality, it costs the turn. That belongs in the latency table VOX-032
 adds, and it is an argument for `k` being the knob that moves first.
+
+---
+
+## Grounded turn (VOX-032)
+
+The two POC pieces move inside the turn. After STT the transcript goes to retrieval, and what comes
+back decides which prompt writes the reply — `make demo`, `make ground` for the same thing from a
+recording.
+
+```
+STT ──> retrieve ──> hits ──> answer prompt + excerpts ──arms.llm──> spoken answer + doc:page
+                  └─> []   ──> reply prompt ────────────arms.llm──> ordinary spoken reply
+```
+
+**The router is the measured floor, not a classifier.** `RETRIEVAL_SCORE_FLOOR` was calibrated
+against `evals/dev/retrieval_floor_queries.json` and can be re-run; an intent model in front of it
+would be a second, unmeasured decision, and it fails in the expensive direction — a misrouted
+greeting costs a plain reply, a misrouted policy question costs an invented policy number.
+
+**`t_retrieval_ms` sits beside the five VOX-003 fields, not inside them.** `TURN_FIELDS`,
+`stage_sum_ms` and `ok` all derive from `telemetry.STAGES`, and the phase gates read exactly those,
+so a sixth stage would redefine the split — and would make `ok` false for a turn that ran without an
+index, which is a turn that spoke perfectly well. It is timed *outside* `stage("llm")` for the
+opposite reason: retrieval is ~1 ms against an LLM call of ~500 ms, and folding it in charges the
+model for time it never spent. `tests/unit/test_grounded_turn.py` asserts both.
+
+**Three states, three different sentences.** No chunk cleared the floor → the plain reply path, as
+before this ticket. No index at all (a clean clone: the corpus is gitignored) → also the plain path,
+announced once at startup and never per turn, because a demo that quietly stopped being grounded
+looks identical to a run of uncovered questions. Chunks that cleared the floor without containing
+the answer → the model's refusal, spoken. `--no-kb` forces the pre-RAG path for a whole run.
+
+**`grounded` is on every turn line that reached a reply**, not only the grounded ones — VOX-033 sums
+it into a rate, and a rate needs its denominator recorded while the turns were happening. Beside it:
+`retrieved`, `sources` (Hit.source spelling, so the printed line and the JSONL cannot drift) and
+`top_score`.
+
+**One routing, two loops.** `src/loop.py` and `src/harness.fixture_turn` both call
+`answer.turn_reply()`. The harness defaults `idx=None` rather than to the process-wide index, so
+`scripts/compare_arms.py` still times the plain path — a grounded turn carries ~5x the prompt, and
+that cost belongs to the knowledge base, not to the arm being compared.
+
+### Measured, `make ground`, 2026-08-20
+
+Five grounded turns and three plain ones, same 3.48 s recording for the grounded rows, real
+`runs/turns.jsonl` and `runs/calls.jsonl` fields.
+
+| | grounded (n=5) | plain (n=3) |
+|---|---|---|
+| `t_retrieval_ms` | 0.5-1.0 | not written (no index) / 0.7-0.9 (miss) |
+| `prompt_tokens` | **1381** | 269-283 |
+| llm call | 367-844 ms | 383-509 ms |
+| `t_stt_ms` | 303-317 | 303-408 |
+| `t_tts_ms` | 4048-5894 | 3093-4155 |
+| `time_to_first_audio_ms` | 5568-7825 | 4780-5683 |
+
+So the grounded prompt is **5.1x** the plain one and the remote arm still answers inside a second —
+the two llm ranges overlap, so at k=5 and 215 chunks the context is not what the user waits for. TTS
+remains the largest stage in every turn, as it has been since VOX-003. Retrieval is ~1 ms and is
+invisible at this corpus size; what it buys is the 12-working-days answer coming out of
+`leave-policy:p4` instead of out of the model's memory.
+
+The local fallback is the caveat carried over from VOX-031 and it has not been re-measured here:
+1381 prompt tokens took the 3B **72.6 s** in that ticket's table. On the grounded path a rate limit
+does not cost the turn's quality, it costs the turn, and `k` is the knob that moves first.
+
+### Two findings this wiring surfaced — both since addressed, see § Hybrid retrieval
+
+**A user's own numbers can push a covered question under the floor.** Measured, `scripts/ask.py`:
+
+Both rows are the same chunk, `separation-policy:p13` — the one that states the PL encashment rule.
+
+| query | terms | its raw BM25 | its score | outcome |
+|---|---|---|---|---|
+| `if I have base pay of 10,000 and PL balance of 12, how much my leave encashment would be` | 9 | 15.41 | **0.250** | nothing cleared the floor 0.280 — refused with no model call |
+| `if I have base pay and PL balance how much leave encashment would I get` | 7 | 15.41 | **0.331** | returned top-1, answered |
+
+Identical raw BM25 sum, different normalised score. `10`, `000` and `12` contribute nothing to the
+numerator and are charged near-maximum IDF in the query ceiling (see the OOV rule above), so they
+dilute a question the corpus does answer. This is a VOX-030 scoring decision meeting real spoken
+questions for the first time. **Since fixed** by the dense half: the same question now retrieves
+`separation-policy:p13` and is answered. The lexical floor was not nudged.
+
+**Grounding does not constrain arithmetic.** With the floor dropped so the same question retrieves,
+`separation-policy:p13` states that PL encashment is based on last-drawn basic salary and the number
+of eligible days, and gives **no per-day rate**. The arm answered *"You will be paid 12,000 for your
+leave encashment"* — a computed number the excerpts do not support, carrying four citations.
+`answer.py` guards against claims that were never retrieved; it does not guard against a
+calculation invented on top of what was. **Since fixed** by
+`prompts/answer_from_source_v2.md`, which forbids computing a figure — see § Hybrid retrieval.
+
+---
+
+## Hybrid retrieval (BM25 + a sentence encoder)
+
+Written after a live `make demo` turn got a wrong answer to a question the corpus answers.
+
+**The failure.** "How many paternal leaves am I entitled to according to policy". The corpus says it
+plainly — `leave-policy:p12`, *"Every married male employee will be allowed to take 5 calendar days
+leave in one go for his new-born"* — and BM25 put that chunk at **rank 110 of 137**. `paternal` is
+not `paternity` and `leaves` is not `leave`, so neither term matched anything at all. The turn took
+the plain-reply path and answered from the model's general knowledge.
+
+Two things were wrong and only one of them was the wording:
+
+| query | terms | lexical top-1 | rank of the answering chunk |
+|---|---|---|---|
+| `paternity leave` | 2 | 0.800 | **1** |
+| `paternity leave entitlement` | 3 | 0.605 | **1** |
+| `how many paternity leaves am I entitled to` | 4 | 0.276 | 11 |
+| `How many paternal leaves am I entitled to according to policy` | 6 | 0.140 | **110** |
+
+The score is BM25 divided by the query's own information ceiling, so every filler word a person
+actually says — `many`, `entitled`, `according`, `policy` — is charged into the denominator. A
+spoken question is 4-8 words and mathematically cannot reach a floor calibrated on 2-3 word queries.
+Note row three: **with the exact corpus word**, "how many paternity leaves am I entitled to" scores
+0.276 against a floor of 0.280. It was never only about "paternal".
+
+### The two halves
+
+```
+query ──> BM25 (terms)     ──> lexical rank + score in [0,1)  ─┐
+      └─> bge-small (meaning) ──> cosine rank + cosine        ─┴─> RRF ──> top k
+```
+
+`BAAI/bge-small-en-v1.5`, local, 384-dim, CLS-pooled with the query instruction the model was
+trained with. It is an arm (`config.EMBED_ARMS`, `--embed`), so `sentence-transformers/all-MiniLM-L6-v2`
+is a flag away and the two are comparable the way VOX-013 compares arms.
+
+**Fused by rank, never by score.** A normalised BM25 fraction and a cosine are different units;
+adding them with weights means inventing an exchange rate and then tuning it, which is a knob with
+no measurement behind it. RRF asks each half only where it put the chunk.
+
+**A chunk is kept if either half vouches for it**, and a refusal needs both to miss. Union and not
+intersection: the halves fail on different questions, and requiring both would keep only the
+questions BM25 could already answer.
+
+**The half with no evidence abstains from the ordering.** This is the part that was not obvious and
+it cost an afternoon. With equal-weight RRF the paternity chunk was *dense rank 1* and still missed
+the top five, because two lukewarm ranks (lex 5 + dense 3, on chunks that answer nothing) outscore
+one excellent rank plus one terrible one. So when BM25's own best chunk is under `floor`, BM25 has
+not found this question and its ordering is noise: it stops voting. That is the floor applied to the
+query rather than to the chunk — the same measured number, used for what it actually measures.
+
+The dense half gets no such courtesy, and the asymmetry is measured rather than assumed: on the dev
+queries the lexical score separates answerable from absent and **no dense signal does** — not the
+cosine, not its z-score against the corpus, not its margin over the mean, not the gap to the 6th
+best chunk. An encoder that cannot tell when it is lost cannot be asked to abstain.
+
+**The encoder is a model call**, so it goes through `arms.embed()` and the cost logger like
+everything else, and `turn_id` joins the query embedding to its turn. The sentence in `retrieval.py`
+about being the one stage with no cost line is gone, because it stopped being true.
+
+**No fallback arm, deliberately.** A second encoder answers in a different vector space from the
+cached chunk vectors, so every cosine would be arithmetic between unrelated bases — silently, since
+a meaningless cosine is still a number in [-1, 1]. If the encoder cannot load, the dense half is
+skipped and BM25 answers alone: a worse ranking, not a wrong one.
+
+### Measured, 2026-08-20
+
+Index build, `make index`: 215 chunks encoded in **25.1 s** (117 ms/chunk, once per re-index),
+cached to `runs/embeddings.npz` keyed by a fingerprint of the chunk text. All 215 vectors unit norm
+(min 1.0000, max 1.0000), which is what makes `DENSE_SCORE_FLOOR` a cosine at all.
+
+Per turn, `t_retrieval_ms` went from **~1 ms to 83-117 ms** — that is one encoder forward pass on
+CPU, and it is the price of the ranking. Against `t_stt_ms` 271-370 ms and `t_tts_ms` 4-5.8 s it is
+not what the user waits for.
+
+Floors, `make floors` (13 dev queries, 7 answerable / 6 absent):
+
+| | answerable | absent | separable? |
+|---|---|---|---|
+| lexical (BM25 ÷ ceiling) | min **0.320** | max **0.234** | yes — floor 0.277 |
+| dense (cosine) | min **0.676** | max **0.738** | **no** |
+
+Top-1 landed in an expected document 7/7 for *both* halves — the encoder ranks as well as BM25 on
+the queries BM25 can do, and better on the ones it cannot.
+
+The dense column does not separate, and `config.DENSE_SCORE_FLOOR` says so rather than implying a
+gap. 0.65 is chosen, not derived: 0.026 under the weakest answerable query, above two of six absent
+ones. The alternative was 0.674 — under the weakest answerable by 0.002, which is a coincidence and
+not a threshold. A false refusal costs a real employee their answer; a false hit costs one free-tier
+call that ends in the right refusal. Not symmetric, and the floor is set accordingly.
+
+So retrieval alone routes **9/13**. End to end, with the prompt and the numeric guard below doing
+the job the floor cannot, it routes **14/14** — including the paternity question, which now
+answers:
+
+```
+Q  How many paternal leaves am I entitled to according to policy
+A  You are entitled to 5 calendar days of paternity leave in one go for your newborn.
+   grounded=True  sources=['leave-policy:p12', ...]
+```
+
+At temperature 0.3 one query routed wrong here — "how many days of sabbatical leave can I take"
+came back as *"There is no mention of sabbatical leave in the provided excerpts"*, which is a
+refusal in substance but not the `REFUSAL` string, so `is_refusal()` read it as an answer and the
+turn logged `grounded: true`. It went away with deterministic sampling, below. It is worth
+remembering as a shape rather than a fixed bug: a paraphrased refusal counts as an answer, and
+VOX-033's rate has to survive that.
+
+### The prompt had to move too: `answer_from_source_v2.md`
+
+Grounding constrained which facts the model used and not what it did with them. Asked *"if I have
+base pay of 10,000 and PL balance of 12, how much my leave encashment would be"*, v1 answered **"you
+will be paid 12,000"** — cited, fluent, and not in any excerpt. The chunk it had gives the formula
+`(last drawn basic salary / days in the year) * eligible balance`, which is not 12,000 for any
+reading of those inputs.
+
+v2 forbids computing a figure and says what to do instead — state the rule, let the person apply it:
+
+```
+A  Leave encashment will be paid along with the final settlement of salary. Payment will be
+   calculated based on the basic salary and the number of PL days eligible for encashment.
+```
+
+Versioned as a new file rather than edited in place (VOX-018): the numbers in the VOX-031 table
+above were measured against v1, and a prompt you can no longer read is a measurement you can no
+longer reproduce.
+
+### Asking was not enough: deterministic sampling and a numeric guard
+
+`answer_from_source_v2.md` forbids computing a figure. A live turn then asked *"if I have a base pay
+of 5000 rupees and 20 privileged leave, then how much will I get in leave encashment?"* and heard:
+
+```
+vox says : 'You will get 12 rupees in leave encashment.'
+  grounded in leave-policy:p10, p11, p7, p8, p9 (top score 0.103, 5 chunks in context)
+```
+
+Asked three times, the same question returned two correct refusals and that. **Nothing was wrong
+with the prompt on the two runs where it worked** — the answer was being sampled from a distribution
+that contains the bad one, at `nlu.TEMPERATURE = 0.3`.
+
+**So the grounded path samples at 0** (`answer.ANSWER_TEMPERATURE`), while a spoken reply keeps 0.3.
+Temperature became a per-*call* option rather than an arm field, so both still run on the same arm
+and stay comparable. Reading five policy excerpts is not a task where variety is a feature, and a
+gate that cannot reproduce its own number is not a gate.
+
+That made it reproducible and still wrong — consistently, now:
+
+> You are entitled to 12 working days of Privilege Leaves every year... Since you have 20 privileged
+> leave, which is 16 days more than the 24-day cap, you will get 16 days in leave encashment.
+
+Fluent, cited, and false twice over: 20 is not more than 24, and no excerpt contains 16.
+
+**So the prompt's own rule is enforced in code.** `answer.ungrounded_numbers()` extracts every figure
+a reply states — digits and words alike, so "twenty-five thousand" and "25,000" are the same number —
+and checks each against the excerpts. A figure that appears in none makes the reply ungrounded, and
+it becomes the same refusal a listener would have heard if retrieval had missed. The suppressed
+reply goes to stderr with the offending number so the refusal can be explained.
+
+Two asymmetries make it usable rather than merely strict:
+
+- **A phrase asserts its value, not its pieces.** "twenty-five thousand" claims 25000; an answer
+  held to 5 and 20 as well would be refused for saying a number correctly. On the *excerpt* side the
+  pieces do count, so a document written "25 thousand" still matches. Generous about what a document
+  contains, strict about what a reply claims.
+- **A number the person supplied is not grounded by having been asked.** The excerpts are the only
+  source. Echoing the caller's own figure back inside an answer is the shape of the fabricated
+  calculation, not an innocent restatement — every wrong variant above was caught on the `20`.
+
+Measured, `make floors` queries end to end: **14/14**, with no answerable query refused by the
+guard — including the ones whose answers really do contain numbers ("twelve working days",
+"25,000", "the eighth of November", "three months", "5 calendar days"). The encashment question now
+refuses. That is blunter than the ideal answer (state the rule, let the person apply it) and it is
+the right failure: a refusal costs a question, a wrong rupee figure costs trust.
+
+### What this does not fix
+
+- **STT is upstream of all of it.** Spoken, the same encashment question came back as *"how much my
+  leaving cashment would be"* — the one high-information term destroyed before retrieval ran. That
+  is VOX-021 (vocabulary biasing, measured before and after) and it now has a concrete case.
+- **A 33M encoder does not know when it is lost.** Every question now reaches the model unless both
+  floors reject it, so the refusal budget has shifted from arithmetic to tokens. A larger encoder is
+  the obvious next arm to measure, and it is a row in `config.EMBED_ARMS`.
+- **The numeric guard checks presence, not meaning.** "You will get 12 rupees" would survive it if
+  some excerpt happened to contain a 12 — as one did. What killed that reply was the caller's own
+  `20`, not the wrong unit on the `12`. Catching a number that is real but means something else
+  needs a different mechanism than this one.
+- **The dev set is 13 queries**, all written before any of this was known. It is a starting point,
+  not a distribution; the queries in this section are not in it, and adding them is the first thing
+  VOX-033 should do.
 
 ---
 

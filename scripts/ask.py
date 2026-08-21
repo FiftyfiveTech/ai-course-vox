@@ -37,7 +37,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows console i
 
 from src import answer as answer_mod, retrieval, telemetry                      # noqa: E402
 from src.config import (BM25_B, BM25_EPSILON, BM25_K1, CHUNKS_FILE, DEFAULT_LLM,  # noqa: E402
-                        RETRIEVAL_SCORE_FLOOR, RETRIEVAL_TOP_K, REPO_ROOT)
+                        DENSE_SCORE_FLOOR, HYBRID_RETRIEVAL, RETRIEVAL_SCORE_FLOOR,
+                        RETRIEVAL_TOP_K, REPO_ROOT)
 
 FLOOR_QUERIES = REPO_ROOT / "evals" / "dev" / "retrieval_floor_queries.json"
 SNIPPET = 96
@@ -55,9 +56,15 @@ def show_index(idx):
     print(f"index      {len(idx)} chunks over {len(idx.doc_ids)} documents, "
           f"{avg:.0f} scoreable terms per chunk (min {min(lengths)}, max {max(lengths)})")
     print(f"bm25       Okapi k1={BM25_K1} b={BM25_B} epsilon={BM25_EPSILON}")
+    if idx.has_vectors:
+        print(f"dense      {idx.embed_arm}, {idx.vectors.shape[1]}-dim, "
+              f"floor {DENSE_SCORE_FLOOR:.3f}   fused by rank (RRF)")
+    else:
+        print("dense      off — BM25 alone. `make index` builds the vectors; "
+              "VOX_HYBRID_RETRIEVAL=0 asks for this deliberately.")
 
 
-def ask(idx, query, k, floor):
+def ask(idx, query, k, floor, dense_floor):
     """Print the ranked hits for one query. -> the hits above the floor, best first.
 
     The hits are returned rather than counted so `--answer` can pass these exact chunks to
@@ -72,25 +79,42 @@ def ask(idx, query, k, floor):
         return []
 
     t0 = time.perf_counter()
-    hits = retrieval.retrieve(query, k=k, floor=floor, idx=idx)
+    hits = retrieval.retrieve(query, k=k, floor=floor, idx=idx, dense_floor=dense_floor)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
     ranked = idx.rank(query)                    # unfloored, so a miss can show what it did see
     best = ranked[0].score if ranked else 0.0
-    print(f"retrieval  {elapsed_ms:.1f} ms   top-1 score {best:.3f}   floor {floor:.3f}")
+    dense = idx.dense_rank(query) if idx.has_vectors else []
+    best_dense = dense[0][1] if dense else None
+
+    line = f"retrieval  {elapsed_ms:.1f} ms   lexical top-1 {best:.3f} (floor {floor:.3f})"
+    if best_dense is not None:
+        line += f"   dense top-1 {best_dense:.3f} (floor {dense_floor:.3f})"
+    print(line)
 
     if not hits:
-        print(f"\nnothing found — best score {best:.3f} does not clear the floor {floor:.3f}. "
-              f"Not in the documents.")
+        # Both halves have to miss now, so the sentence has to name both — "the floor rejected it"
+        # was a complete explanation when there was one floor and is a half-truth with two.
+        why = f"best lexical {best:.3f} < {floor:.3f}"
+        if best_dense is not None:
+            why += f", best cosine {best_dense:.3f} < {dense_floor:.3f}"
+        print(f"\nnothing found — {why}. Not in the documents.")
         return []
 
     width = max(len(h.source) for h in hits)
-    print(f"\n  {'#':<3}{'score':>7}{'raw':>8}  {'source':<{width}}  chunk  text")
+    print(f"\n  {'#':<3}{'lex':>6}{'lr':>4}{'cos':>7}{'dr':>4}{'fused':>8}  "
+          f"{'source':<{width}}  chunk  text")
     for rank, h in enumerate(hits, start=1):
-        print(f"  {rank:<3}{h.score:>7.3f}{h.raw:>8.2f}  {h.source:<{width}}  {h.chunk_idx:>5}  "
-              f"{snippet(h.text)}")
-    print(f"\n{len(hits)} of {len(ranked)} scoring chunks returned "
-          f"(k={k}), fields: {', '.join(hits[0].as_dict())}")
+        cos = "     -" if h.dense is None else f"{h.dense:>7.3f}"
+        lr = "  -" if h.lex_rank is None else f"{h.lex_rank:>4}"
+        dr = "  -" if h.dense_rank is None else f"{h.dense_rank:>4}"
+        print(f"  {rank:<3}{h.score:>6.3f}{lr}{cos}{dr}{h.fused:>8.4f}  {h.source:<{width}}  "
+              f"{h.chunk_idx:>5}  {snippet(h.text, 60)}")
+    # lr/dr are where each half put the chunk, and they are the interesting column: a hit with
+    # lr 110 and dr 1 is one only the encoder found, which is the whole reason it exists.
+    print(f"\n{len(hits)} returned (k={k}) out of {len(ranked)} lexically scoring chunks"
+          + (f" and {len(dense)} ranked by cosine" if dense else "")
+          + f", fields: {', '.join(hits[0].as_dict())}")
     return hits
 
 
@@ -148,12 +172,35 @@ def answer(query, hits, model_id):
     return 0
 
 
-def calibrate(idx):
-    """Print the top-1 score for known-answerable and known-absent queries. -> exit code.
+def separation(label, hit_scores, miss_scores, floor_name):
+    """Print the gap between answerable and absent for one scorer. -> the implied floor, or None.
 
-    The floor is whatever number sits in the gap between the two columns. If they overlap, there is
-    no such number and the honest output is to say so rather than to split the difference — the
-    stopword list, the chunk geometry or k1/b is what needs changing, and then this is re-run.
+    Factored out because there are two scorers now and the arithmetic is the same for both: the
+    floor is whatever number sits in the gap between the two columns, and if they overlap there is
+    no such number. Saying so is the honest output; splitting the difference would be picking a
+    threshold that is known to be wrong for some query in the set.
+    """
+    lo_hit, hi_miss = min(hit_scores), max(miss_scores)
+    print(f"\n{label}")
+    print(f"  answerable  min {lo_hit:.3f}  max {max(hit_scores):.3f}")
+    print(f"  absent      min {min(miss_scores):.3f}  max {hi_miss:.3f}")
+    if lo_hit > hi_miss:
+        floor = round((lo_hit + hi_miss) / 2, 3)
+        print(f"  separable — gap [{hi_miss:.3f}, {lo_hit:.3f}], midpoint -> {floor_name} = {floor}")
+        return floor
+    print(f"  NOT separable — an absent query scores {hi_miss:.3f}, above the weakest answerable "
+          f"one at {lo_hit:.3f}.")
+    return None
+
+
+def calibrate(idx):
+    """Print what each half scores on known-answerable and known-absent queries. -> exit code.
+
+    Two floors to set now, and they are not interchangeable. The lexical one is a fraction of the
+    query's own information content; the dense one is a cosine, which has an absolute scale and does
+    not move with question length. Both are corpus-specific and both are measured here rather than
+    guessed — and the union rule at the bottom is the one that actually decides a refusal, so it is
+    the one that has to separate.
     """
     if not FLOOR_QUERIES.is_file():
         sys.exit(f"no calibration queries at {FLOOR_QUERIES}")
@@ -164,7 +211,9 @@ def calibrate(idx):
         for e in entries:
             ranked = idx.rank(e["q"])
             top = ranked[0] if ranked else None
-            out.append((e["q"], e.get("expect_doc"), top))
+            dense = idx.dense_rank(e["q"]) if idx.has_vectors else []
+            top_dense = dense[0] if dense else None
+            out.append((e["q"], e.get("expect_doc"), top, top_dense))
         return out
 
     hits = scores(spec["hit"])
@@ -172,38 +221,74 @@ def calibrate(idx):
 
     for label, rows in (("answerable", hits), ("absent from the corpus", misses)):
         print(f"\n=== {label} ({len(rows)} queries) ===")
-        print(f"  {'top-1':>7}{'raw':>8}  {'source':<44}  query")
-        for query, expect, top in rows:
+        print(f"  {'lex':>6}{'cos':>7}  {'lexical top-1':<40}  {'cosine top-1':<24}  query")
+        for query, expect, top, top_dense in rows:
             src = top.source if top else "-"
             if expect:
                 src += " ok" if top and top.doc_id in expect else f" (want {'|'.join(expect)})"
-            print(f"  {(top.score if top else 0.0):>7.3f}{(top.raw if top else 0.0):>8.2f}  "
-                  f"{src:<44}  {query}")
+            dsrc, dscore = "-", 0.0
+            if top_dense is not None:
+                row, dscore = top_dense
+                chunk = idx.chunks[row]
+                dsrc = f"{chunk['doc_id']}:p{chunk['page']}"
+                if expect:
+                    dsrc += " ok" if chunk["doc_id"] in expect else " (miss)"
+            print(f"  {(top.score if top else 0.0):>6.3f}{dscore:>7.3f}  {src:<40}  "
+                  f"{dsrc:<24}  {query}")
 
-    hit_scores = sorted(t.score if t else 0.0 for _, _, t in hits)
-    miss_scores = sorted(t.score if t else 0.0 for _, _, t in misses)
-    lo_hit, hi_miss = hit_scores[0], miss_scores[-1]
-    print(f"\nanswerable  min {lo_hit:.3f}  max {hit_scores[-1]:.3f}")
-    print(f"absent      min {miss_scores[0]:.3f}  max {hi_miss:.3f}")
+    lex_hit = [t.score if t else 0.0 for _, _, t, _ in hits]
+    lex_miss = [t.score if t else 0.0 for _, _, t, _ in misses]
+    lex_floor = separation("lexical (BM25 / query ceiling)", lex_hit, lex_miss,
+                           "RETRIEVAL_SCORE_FLOOR")
 
-    # Informational, not this ticket's number: correct-source@k over a written query set is what
-    # VOX-033's gate prints, over its own queries. Here it is a sanity check that the floor is being
-    # calibrated on queries that retrieve the right thing in the first place.
-    right_doc = sum(1 for _, expect, top in hits if expect and top and top.doc_id in expect)
-    print(f"top-1 in an expected document: {right_doc}/{len(hits)}")
+    dense_floor = None
+    if idx.has_vectors:
+        cos_hit = [d[1] if d else 0.0 for _, _, _, d in hits]
+        cos_miss = [d[1] if d else 0.0 for _, _, _, d in misses]
+        dense_floor = separation(f"dense (cosine, {idx.embed_arm})", cos_hit, cos_miss,
+                                 "DENSE_SCORE_FLOOR")
 
-    if lo_hit > hi_miss:
-        floor = round((lo_hit + hi_miss) / 2, 2)
-        print(f"\nseparable: every answerable query outscores every absent one.")
-        print(f"midpoint of the gap [{hi_miss:.3f}, {lo_hit:.3f}] -> "
-              f"RETRIEVAL_SCORE_FLOOR = {floor}")
-        return 0
+    # Informational, not this script's number: correct-source@k over a written query set is what
+    # VOX-033's gate prints, over its own queries. Here it is a sanity check that the floors are
+    # being calibrated on queries that retrieve the right thing in the first place — and it is now
+    # per half, because "the encoder found it and BM25 did not" is exactly what this bought.
+    def right(rows, dense_side):
+        n = 0
+        for _q, expect, top, top_dense in rows:
+            if not expect:
+                continue
+            if dense_side:
+                n += bool(top_dense and idx.chunks[top_dense[0]]["doc_id"] in expect)
+            else:
+                n += bool(top and top.doc_id in expect)
+        return n
 
-    print(f"\nNOT separable: an absent query scores {hi_miss:.3f}, above the weakest answerable one "
-          f"at {lo_hit:.3f}.")
-    print("No single floor separates them. Tune the stopword list, the chunk geometry or k1/b and "
-          "re-run — do not split the difference.")
-    return 1
+    print(f"\ntop-1 in an expected document:  lexical {right(hits, False)}/{len(hits)}"
+          + (f"   dense {right(hits, True)}/{len(hits)}" if idx.has_vectors else ""))
+
+    if not idx.has_vectors:
+        return 0 if lex_floor is not None else 1
+
+    # What actually decides a refusal is the union: a chunk is kept if either half vouches for it,
+    # so the state "not in the documents" survives only if *both* halves reject every absent query
+    # at the chosen floors. Separability of each column on its own does not imply that, which is why
+    # it is checked here rather than inferred.
+    lex_at = RETRIEVAL_SCORE_FLOOR if lex_floor is None else lex_floor
+    dense_at = DENSE_SCORE_FLOOR if dense_floor is None else dense_floor
+    print(f"\nunion rule at lexical {lex_at:.3f} / cosine {dense_at:.3f} "
+          f"(a chunk is kept if either half vouches for it):")
+    kept = 0
+    for label, rows, want in (("answerable", hits, True), ("absent", misses, False)):
+        for query, _expect, top, top_dense in rows:
+            got = bool(top and top.score > lex_at) or bool(top_dense and top_dense[1] >= dense_at)
+            kept += got == want
+            if got != want:
+                print(f"  {'FALSE REFUSAL' if want else 'FALSE HIT    '}  "
+                      f"lex {(top.score if top else 0.0):.3f} cos "
+                      f"{(top_dense[1] if top_dense else 0.0):.3f}  {query}")
+    total = len(hits) + len(misses)
+    print(f"  {kept}/{total} queries routed correctly")
+    return 0 if kept == total else 1
 
 
 def main():
@@ -214,6 +299,8 @@ def main():
                     help=f"how many chunks to return (default {RETRIEVAL_TOP_K})")
     ap.add_argument("--floor", type=float, default=RETRIEVAL_SCORE_FLOOR,
                     help=f"score floor (default {RETRIEVAL_SCORE_FLOOR})")
+    ap.add_argument("--dense-floor", type=float, default=DENSE_SCORE_FLOOR,
+                    help=f"cosine floor for the dense half (default {DENSE_SCORE_FLOOR})")
     ap.add_argument("--calibrate", action="store_true",
                     help=f"score {FLOOR_QUERIES.name} and print the floor the gap implies")
     ap.add_argument("--answer", action="store_true",
@@ -237,9 +324,19 @@ def main():
     show_index(idx)
     print(f"build      {build_ms:.0f} ms (once per process, not per turn)")
 
+    if idx.has_vectors:
+        # Load the encoder before anything is timed, for the reason every other stage does it: the
+        # first forward pass otherwise carries a ~9 s model load, and the `retrieval` line below
+        # would report it as query latency. src/loop.py gets this from arms.select() at startup.
+        from src import arms                                              # noqa: E402
+        t0 = time.perf_counter()
+        arms.warm("embed")
+        print(f"encoder    loaded in {(time.perf_counter() - t0) * 1000:.0f} ms "
+              f"(once per process, not per query)")
+
     if args.calibrate:
         return calibrate(idx)
-    hits = ask(idx, query, args.k, args.floor)
+    hits = ask(idx, query, args.k, args.floor, args.dense_floor)
     if args.answer:
         return answer(query, hits, args.llm)
     return 0

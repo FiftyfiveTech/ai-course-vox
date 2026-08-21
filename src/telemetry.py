@@ -114,10 +114,20 @@ class TurnTimer:
         Without this a turn line is a latency split with no model behind it, and once arms are
         selectable by flag two lines that look comparable may not be. Joining to calls.jsonl on
         turn_id would also answer it, but the comparison VOX-013 has to make is per turn.
+
+        Named arms and timed stages are not the same set, and that is the point of the check below.
+        `embed` is a registered arm that runs inside a turn — it ranks the chunks — but it is not one
+        of the five VOX-003 fields, so it gets a `<stage>_model` on the record and no timing slot.
+        Anything not in the registry at all is still a typo and still raises: a silently ignored
+        stage name would leave a turn line claiming an arm it never named.
         """
+        from src.config import ARMS                       # local: config imports nothing from here
         for stage, arm in by_stage.items():
-            if stage not in self.ms:
-                raise ValueError(f"unknown stage {stage!r} — expected one of {STAGES}")
+            if stage not in self.ms and stage not in ARMS:
+                raise ValueError(
+                    f"unknown stage {stage!r} — expected a timed stage {STAGES} or a registered "
+                    f"arm stage {tuple(ARMS)}"
+                )
             self.extra[f"{stage}_model"] = arm.id if hasattr(arm, "id") else arm
 
     def fallback(self, stage, from_arm, to_arm, reason, failed_ms=None):
@@ -185,6 +195,41 @@ class TurnTimer:
             yield
         finally:
             self.ms[name] = round((time.perf_counter() - t0) * 1000, 1)
+
+    @contextmanager
+    def retrieval(self):
+        """Time the retrieval step and record it as `t_retrieval_ms` (VOX-032).
+
+        Deliberately *not* a sixth entry in STAGES. TURN_FIELDS, stage_sum_ms and `ok` are all
+        derived from STAGES and the phase gates read exactly those, so adding retrieval there
+        would redefine the five-field split VOX-003 measured, and would make `ok` false for a turn
+        that ran without an index — a turn that spoke perfectly well.
+
+        Timed outside `stage("llm")` and not inside it: BM25 over a few hundred chunks is
+        milliseconds against an LLM call of seconds, so folding the two together is how a cheap
+        step disappears and a model is blamed for latency it never spent.
+        """
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.extra["t_retrieval_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+    def grounding(self, hits, grounded, sources=()):
+        """What this turn's reply was grounded in (VOX-032).
+
+        `grounded` is the field VOX-033's gate sums into a rate, which is why it is written on
+        every turn that got as far as a reply rather than only on the grounded ones — a rate needs
+        a denominator that was recorded while the turns were happening.
+
+        `sources` is the provenance of the context that was passed to the model, in Hit.source
+        form, so "leave-policy:p4" is spelled here exactly as retrieval and the answer print it.
+        Empty on a refusal: see src/answer.py on why a refusal cites nothing.
+        """
+        self.extra["retrieved"] = len(hits)
+        self.extra["grounded"] = bool(grounded)
+        self.extra["sources"] = list(sources)
+        self.extra["top_score"] = round(hits[0].score, 4) if hits else None
 
     def first_audio(self):
         """Stamp the first block reaching the speaker. Idempotent — the callback fires per block."""

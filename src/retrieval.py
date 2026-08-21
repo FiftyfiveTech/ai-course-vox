@@ -1,11 +1,28 @@
-"""Lexical retrieval over the VOX-029 chunks (VOX-030).
+"""Retrieval over the VOX-029 chunks: lexical BM25 (VOX-030) fused with a dense encoder.
 
 Query string in, top-k chunks out, each carrying the provenance VOX-029 wrote: `doc_id`, `page`,
-`chunk_idx`, plus the BM25 `score` and the `text` itself. No model, no network, no key — Okapi BM25
-is arithmetic over term frequencies, so this is the one stage of the pipeline that does not touch
-`src/telemetry.py`'s cost logger. It must not: `log_call` checks the provider against `FREE_TIERS`
-and stamps a `cost_usd`, and there is no provider here to name. Retrieval still costs *time*, and
-that is VOX-032's business — it adds `t_retrieval_ms` to the turn record.
+`chunk_idx`, plus the BM25 `score`, the dense cosine, and the `text` itself.
+
+**Why there are two halves.** BM25 matches terms, not meanings. A live turn on 2026-08-20 asked
+"how many paternal leaves am I entitled to according to policy" and the one chunk that answers it —
+`leave-policy:p12`, "ADDITIONAL LEAVES 1. Paternity Leave" — came back at rank **110 of 137**:
+`paternal` is not `paternity`, `leaves` is not `leave`, so neither term matched anything. The same
+chunk ranks 1 for the query "paternity leave". No floor fixes that, because the ranking itself was
+wrong; only a scorer that can see past the surface form does. See `config.DENSE_SCORE_FLOOR` for the
+three-row measurement that bought this.
+
+BM25 stays. It is exact where the dense half is fuzzy — a policy that names "Form 16" or "Keka
+Portal" is found by the term, and an encoder trained on general English will happily rank a
+paragraph about something adjacent above it. The two are fused by **rank**, never by score
+(`RRF_K`), because a normalised BM25 fraction and a cosine are different units and adding them with
+weights would be inventing an exchange rate between them.
+
+The lexical half is arithmetic — no model, no network, no key. The dense half is a model, so it goes
+through `arms.embed()` and therefore through the cost logger like every other model call in this
+repo; the sentence that used to be here about retrieval being the one stage with no cost line is no
+longer true, and `src/embeddings.py` says so too. Retrieval also costs *time*, which is VOX-032's
+`t_retrieval_ms` on the turn record — and that number now contains one encoder forward pass per
+turn, which is the price of the ranking above.
 
 Four decisions worth knowing before reading the code:
 
@@ -47,12 +64,17 @@ routinely score identically on a short query. Sorting by `(-score, doc_id, chunk
 score alone means the same query returns the same five chunks on every run — which is the difference
 between a gate number that can be re-run and one that drifts.
 """
+import hashlib
 import math
+import pathlib
 import re
 
+import numpy as np
 from rank_bm25 import BM25Okapi
 
-from src.config import BM25_B, BM25_EPSILON, BM25_K1, RETRIEVAL_SCORE_FLOOR, RETRIEVAL_TOP_K
+from src.config import (BM25_B, BM25_EPSILON, BM25_K1, DENSE_SCORE_FLOOR, EMBEDDINGS_FILE,
+                        FUSION_CANDIDATES, HYBRID_RETRIEVAL, RETRIEVAL_SCORE_FLOOR,
+                        RETRIEVAL_TOP_K, RRF_K, resolve)
 from src.sources import load_chunks
 
 _WORD = re.compile(r"[a-z0-9]+")
@@ -89,19 +111,35 @@ class Hit:
     VOX-032 puts it on the turn record, and "leave-policy:p4" being spelled the same way in both is
     the whole point of carrying provenance this far.
 
-    `score` is the normalised one, in [0, 1) — it is what ranks and what the floor compares against.
+    `score` is the normalised **lexical** one, in [0, 1) — what BM25 ranked on and what
+    `RETRIEVAL_SCORE_FLOOR` compares against. It stays the lexical number after the dense half
+    arrived, rather than becoming a blend: it is the field VOX-030 calibrated, VOX-031 logs and
+    VOX-032 puts on the turn record, and quietly redefining it would invalidate every one of those
+    measurements while every name still looked right.
+
     `raw` is the BM25 sum it came from, carried so the division can be checked rather than trusted.
+    `dense` is the cosine against the query, or None when the dense half did not run — None and 0.0
+    are different facts (no encoder, versus an encoder that saw no similarity).
+    `fused` is the reciprocal-rank-fusion score the hit was ordered by, and `lex_rank`/`dense_rank`
+    are where each half put it — kept because "BM25 had it 110th and the encoder had it 1st" is the
+    only way to read why a chunk is in the list.
     """
 
-    __slots__ = ("doc_id", "page", "chunk_idx", "score", "text", "raw")
+    __slots__ = ("doc_id", "page", "chunk_idx", "score", "text", "raw",
+                 "dense", "fused", "lex_rank", "dense_rank")
 
-    def __init__(self, doc_id, page, chunk_idx, score, text, raw=None):
+    def __init__(self, doc_id, page, chunk_idx, score, text, raw=None,
+                 dense=None, fused=None, lex_rank=None, dense_rank=None):
         self.doc_id = doc_id
         self.page = page
         self.chunk_idx = chunk_idx
         self.score = score
         self.text = text
         self.raw = score if raw is None else raw
+        self.dense = dense
+        self.fused = fused
+        self.lex_rank = lex_rank
+        self.dense_rank = dense_rank
 
     @property
     def source(self):
@@ -114,7 +152,9 @@ class Hit:
                 "score": self.score, "text": self.text}
 
     def __repr__(self):
-        return f"Hit({self.source} #{self.chunk_idx} score={self.score:.3f} raw={self.raw:.3f})"
+        dense = "-" if self.dense is None else f"{self.dense:.3f}"
+        return (f"Hit({self.source} #{self.chunk_idx} lex={self.score:.3f} dense={dense} "
+                f"raw={self.raw:.3f})")
 
     def __eq__(self, other):
         return isinstance(other, Hit) and self.as_dict() == other.as_dict()
@@ -130,10 +170,23 @@ def tokenize(text):
             if len(w) > 1 and w not in STOPWORDS]
 
 
+def _rrf(rank):
+    """-> this ranking's contribution to a fused score: 1/(RRF_K + rank), or 0 if it never ranked.
+
+    Rank and not score, deliberately. A normalised BM25 fraction and a cosine are different units,
+    and combining them with weights would mean inventing an exchange rate between them and then
+    tuning it — a knob with no measurement behind it. RRF only asks each half where it put the
+    chunk. `RRF_K` is what makes rank 1 vs rank 2 a small difference and rank 1 vs rank 20 a large
+    one, which is the behaviour wanted when one half is confident and the other has no idea.
+    """
+    return 0.0 if rank is None else 1.0 / (RRF_K + rank)
+
+
 class Index:
     """A BM25 index over chunk records. Built once; queried per turn."""
 
-    def __init__(self, chunks, k1=None, b=None, epsilon=None):
+    def __init__(self, chunks, k1=None, b=None, epsilon=None, vectors=None,
+                 embed_arm=None):
         if not chunks:
             raise RuntimeError(
                 "no chunks to index — run `make index` first (and check that sources/ has PDFs "
@@ -153,6 +206,23 @@ class Index:
         n = self.bm25.corpus_size
         self.oov_idf = math.log(n - 1 + 0.5) - math.log(1 + 0.5) if n > 1 else 0.0
 
+        # The dense half, or None. Rows line up with `self.chunks` by position and by nothing else,
+        # so a vector file built against a different chunk file is not a stale cache to be
+        # tolerated — it is an index that cites the wrong page. `vectors_for()` fingerprints the
+        # chunk text to make that unrepresentable; this only checks the shape it was handed.
+        if vectors is not None and len(vectors) != len(self.chunks):
+            raise RuntimeError(
+                f"{len(vectors)} vectors for {len(self.chunks)} chunks — the vector cache was "
+                f"built against a different chunk file. Run `make index` to rebuild both."
+            )
+        self.vectors = vectors
+        self.embed_arm = embed_arm        # which encoder wrote them, for the banner and the log
+
+    @property
+    def has_vectors(self):
+        """-> is there a dense half? False means BM25 alone, which is VOX-030 exactly."""
+        return self.vectors is not None and len(self.vectors) > 0
+
     def __len__(self):
         return len(self.chunks)
 
@@ -171,59 +241,246 @@ class Index:
         total = sum(self.bm25.idf.get(t, self.oov_idf) for t in terms)
         return (self.bm25.k1 + 1) * total
 
-    def rank(self, query):
-        """-> every chunk that shares a term with `query`, best first. No floor, no k.
+    def _lexical(self, query):
+        """-> ([Hit] best first with `lex_rank` set, {row index: the same Hit}).
 
-        Separate from `search` so the floor can be *inspected* rather than only applied: a miss has
-        to be able to print the best score it did see, or "nothing found" is indistinguishable from
-        an empty index. `scripts/ask.py --calibrate` scores against this.
+        The row map is what fusion needs: `rank()` drops every chunk that shares no term with the
+        query, so a hit's position in that list says nothing about which chunk it is, and the dense
+        half indexes by row.
         """
         terms = tokenize(query)
         if not terms:
-            return []
+            return [], {}
         ceiling = self.ceiling(terms) or 1.0
         scores = self.bm25.get_scores(terms)
-        hits = [Hit(c["doc_id"], c["page"], c["chunk_idx"], float(s) / ceiling, c["text"], float(s))
-                for c, s in zip(self.chunks, scores) if s > 0]
-        hits.sort(key=lambda h: (-h.score, h.doc_id, h.chunk_idx))
-        return hits
+        by_row = {}
+        for row, (c, sc) in enumerate(zip(self.chunks, scores)):
+            if sc > 0:
+                by_row[row] = Hit(c["doc_id"], c["page"], c["chunk_idx"], float(sc) / ceiling,
+                                  c["text"], float(sc))
+        hits = sorted(by_row.values(), key=lambda h: (-h.score, h.doc_id, h.chunk_idx))
+        for position, h in enumerate(hits, start=1):
+            h.lex_rank = position
+        return hits, by_row
 
-    def search(self, query, k=None, floor=None):
-        """-> the top `k` chunks scoring above `floor`, best first. `[]` means not in the documents.
+    def rank(self, query):
+        """-> every chunk sharing a term with `query`, best first. No floor, no k, no dense half.
 
-        `k` defaults to config.RETRIEVAL_TOP_K (5, the acceptance criterion's number) and `floor` to
-        config.RETRIEVAL_SCORE_FLOOR. Above, not at: a floor of 0 drops the chunks that share no term
-        with the query, which is what a score of exactly 0 means.
+        Separate from `search` so the floor can be *inspected* rather than only applied: a miss has
+        to be able to print the best score it did see, or "nothing found" is indistinguishable from
+        an empty index. `scripts/ask.py --calibrate` scores against this, and it stays purely
+        lexical so the number it calibrates is the number `RETRIEVAL_SCORE_FLOOR` means.
+        """
+        return self._lexical(query)[0]
+
+    def dense_rank(self, query, turn_id=None, model_id=None):
+        """-> [(row index, cosine)] best first over every chunk. `[]` if there is no dense half.
+
+        One encoder forward pass, through `arms.embed()` so it is logged like every other model
+        call in this repo. The cosine is a dot product because both sides are unit vectors — see
+        src/embeddings.py on why normalising happens once, there.
+        """
+        if not self.has_vectors or not (query or "").strip():
+            return []
+        from src import arms                 # local: arms imports every stage module, this is one
+        q = arms.embed(query, model_id or self.embed_arm, turn_id=turn_id, is_query=True,
+                       corpus_chunks=len(self.chunks))
+        sims = self.vectors @ np.asarray(q, dtype="float32").reshape(-1)
+        order = np.argsort(-sims, kind="stable")
+        return [(int(row), float(sims[row])) for row in order]
+
+    def search(self, query, k=None, floor=None, dense_floor=None, turn_id=None, hybrid=None):
+        """-> the top `k` chunks, best first. `[]` means not in the documents.
+
+        A chunk is a candidate if **either** half vouches for it: lexical score above `floor`, or
+        cosine at least `dense_floor`. Union and not intersection — the two halves fail on different
+        questions, and requiring both would keep only the questions BM25 could already answer, which
+        is the behaviour this was built to replace.
+
+        Candidates are ordered by reciprocal rank fusion, so what decides the top five is where each
+        half *placed* a chunk rather than a blend of two incomparable numbers. Each half offers at
+        most `FUSION_CANDIDATES` rows — wider than `k` on purpose, so a chunk the encoder ranks 8th
+        and BM25 ranks 3rd can still win.
+
+        **A half with no evidence abstains from the ordering.** If BM25's own best chunk does not
+        clear `floor`, it has not found this question and its ranking is noise; fusing noise with a
+        confident ranking is how the answer gets buried under chunks both halves are lukewarm
+        about. See the comment on `lex_confident` for the measurement that forced this.
+
+        `[]` needs both halves to miss, which makes the refusal a stronger claim than it was: a
+        question the documents do not cover now has to fail twice.
+
+        `hybrid=False` (or `VOX_HYBRID_RETRIEVAL=0`) is BM25 alone: VOX-030 behaviour, kept reachable
+        because it is the baseline every hybrid number here is measured against.
         """
         k = RETRIEVAL_TOP_K if k is None else k
         floor = RETRIEVAL_SCORE_FLOOR if floor is None else floor
-        return [h for h in self.rank(query) if h.score > floor][:k]
+        dense_floor = DENSE_SCORE_FLOOR if dense_floor is None else dense_floor
+        hybrid = HYBRID_RETRIEVAL if hybrid is None else hybrid
+
+        lex, by_row = self._lexical(query)
+        dense = self.dense_rank(query, turn_id=turn_id) if hybrid else []
+
+        # Attach the cosine to every lexical hit that has one, and mint a Hit for the rows only the
+        # dense half found. `dense` covers every chunk, so this is where the two views meet.
+        candidates = {row: hit for row, hit in by_row.items() if hit.lex_rank <= FUSION_CANDIDATES}
+        for position, (row, cos) in enumerate(dense, start=1):
+            hit = by_row.get(row)
+            if hit is None:
+                c = self.chunks[row]
+                hit = Hit(c["doc_id"], c["page"], c["chunk_idx"], 0.0, c["text"], 0.0)
+            hit.dense = cos
+            hit.dense_rank = position
+            if position <= FUSION_CANDIDATES:
+                candidates[row] = hit
+
+        keep = [h for h in candidates.values()
+                if h.score > floor or (h.dense is not None and h.dense >= dense_floor)]
+
+        # When BM25 found nothing at all for this query, its *ordering* is noise too, and fusing
+        # noise with a confident ranking loses the answer. Measured, 2026-08-20: for "how many
+        # paternal leaves am I entitled to according to policy" the chunk that answers it —
+        # leave-policy:p12, "5 calendar days leave in one go" — is dense rank **1** and lexical rank
+        # **110**, and equal-weight RRF still kept it out of the top five, because two mediocre ranks
+        # (lex 5 + dense 3, on chunks that answer nothing) outscore one excellent rank plus one
+        # terrible one. So the half that has no evidence abstains rather than voting.
+        #
+        # "No evidence" is `RETRIEVAL_SCORE_FLOOR` applied to the query instead of to the chunk, and
+        # it is the same measured number for the same reason: below it, BM25 cannot tell an
+        # answerable question from an absent one. That is what makes this a threshold and not a
+        # patch.
+        #
+        # The dense half does not get the same courtesy, and that asymmetry is measured rather than
+        # assumed: on the 13 dev queries the lexical score separates answerable from absent
+        # (0.234 | 0.320) and no dense signal does — not the raw cosine, not its z-score against the
+        # corpus, not its margin over the mean, not the gap to the 6th best. An encoder that cannot
+        # tell when it is lost cannot be asked to abstain.
+        lex_confident = bool(lex and lex[0].score > floor)
+        for h in keep:
+            h.fused = (_rrf(h.lex_rank) if lex_confident else 0.0) + _rrf(h.dense_rank)
+        # Ties broken by doc_id then chunk_idx, for the reason the module docstring gives: the same
+        # query has to return the same chunks on every run or no gate number can be re-run.
+        keep.sort(key=lambda h: (-h.fused, -h.score, h.doc_id, h.chunk_idx))
+        return keep[:k]
+
+
+# --- the chunk vectors ------------------------------------------------------------------------
+# Encoding 215 chunks is seconds, not milliseconds, so unlike the BM25 index it is cached to disk.
+# What makes that cache safe is the fingerprint: rows are matched to chunks by *position*, so a
+# vector file that is one re-index out of date does not degrade retrieval, it cites the wrong page.
+
+
+def fingerprint(chunks):
+    """-> a hash of exactly what was encoded: the chunk texts, in order, and nothing else.
+
+    Not the chunk file's bytes. `make index` rewrites that file every run, and a rebuild that
+    produced identical text should not force a re-encode; a reordering or a re-chunk must. Hashing
+    the thing the vectors are *of* is the only version of this that cannot be wrong.
+    """
+    h = hashlib.sha1()
+    for c in chunks:
+        h.update((c.get("text") or "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def load_vectors(chunks, arm, path=None):
+    """-> the cached (n, dim) array for `chunks` under `arm`, or None if there is no usable cache.
+
+    None covers every way a cache can fail to apply — missing, written by another encoder, built
+    over different text, unreadable. All four are the same decision (re-encode) and none of them is
+    an error, so this returns rather than raises, and the caller says out loud what it is doing.
+    """
+    path = pathlib.Path(path or EMBEDDINGS_FILE)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            if str(z["arm"]) != arm.id or str(z["fingerprint"]) != fingerprint(chunks):
+                return None
+            return z["vectors"].astype("float32")
+    except Exception:
+        return None                     # a corrupt cache is a cache to rebuild, not a crash
+
+
+def save_vectors(vectors, chunks, arm, path=None):
+    """Write the cache with the two facts that decide whether it may be reused. -> the path."""
+    path = pathlib.Path(path or EMBEDDINGS_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, vectors=np.asarray(vectors, dtype="float32"), arm=arm.id,
+             fingerprint=fingerprint(chunks), dim=int(np.shape(vectors)[1]) if len(vectors) else 0)
+    return path
+
+
+def vectors_for(chunks, arm=None, path=None, rebuild=False, turn_id=None, echo=None):
+    """-> ((n, dim) float32 unit vectors, the Arm that made them), encoding only if it has to.
+
+    `echo` is called with a sentence when an encode actually happens, because it is the one part of
+    starting up that takes real time — and a silent multi-second pause reads as a hang. Nothing is
+    printed when the cache hits.
+    """
+    say = echo if echo is not None else (lambda *a, **k: None)
+    arm = arm or resolve("embed")
+    if not rebuild:
+        cached = load_vectors(chunks, arm, path)
+        if cached is not None:
+            return cached, arm
+
+    from src import arms                     # local, for the reason dense_rank() gives
+    say(f"encoding {len(chunks)} chunks with {arm.repo_id} (once — cached to "
+        f"{pathlib.Path(path or EMBEDDINGS_FILE).name})…")
+    vectors = arms.embed([c.get("text") or "" for c in chunks], arm.id,
+                         turn_id=turn_id or "index", corpus_chunks=len(chunks))
+    save_vectors(vectors, chunks, arm, path)
+    return vectors, arm
 
 
 _INDEX = None
 
 
-def build(chunks=None, path=None):
-    """-> a fresh Index over `chunks`, or over the chunk file `path` (default config.CHUNKS_FILE)."""
-    return Index(load_chunks(path) if chunks is None else chunks)
+def build(chunks=None, path=None, dense=None, echo=None, rebuild_vectors=False):
+    """-> a fresh Index over `chunks`, or over the chunk file `path` (default config.CHUNKS_FILE).
+
+    `dense` defaults to config.HYBRID_RETRIEVAL. When it is on and the encoder cannot be reached —
+    no weights on this machine, no network on a first run — the failure is reported and the index is
+    built lexical-only rather than refused. That is the one substitution this module makes, and it is
+    safe in a way an encoder swap is not: BM25 alone is a *worse* ranking, not a meaningless one.
+    """
+    say = echo if echo is not None else (lambda *a, **k: None)
+    records = load_chunks(path) if chunks is None else chunks
+    if dense is None:
+        dense = HYBRID_RETRIEVAL
+    if not dense:
+        return Index(records)
+    try:
+        vectors, arm = vectors_for(records, echo=echo, rebuild=rebuild_vectors)
+    except Exception as e:
+        say(f"  warning: the dense half is off — {type(e).__name__}: {e}\n"
+            f"  BM25 alone will answer, so a question phrased unlike the documents may miss. "
+            f"`make setup` fetches the encoder.")
+        return Index(records)
+    return Index(records, vectors=vectors, embed_arm=arm.id)
 
 
-def index(rebuild=False):
+def index(rebuild=False, echo=None, dense=None):
     """-> the process-wide Index, built on first use.
 
-    Indexing 215 chunks is milliseconds, but it is still per-process work and not per-turn work:
-    VOX-032 calls this at startup so the first spoken question is not slower than the second.
+    Building BM25 over 215 chunks is milliseconds; encoding them is seconds on a cold cache. Both
+    are per-process work and not per-turn work, which is why VOX-032 calls this at startup — so the
+    first spoken question is not slower than the second.
     """
     global _INDEX
     if _INDEX is None or rebuild:
-        _INDEX = build()
+        _INDEX = build(echo=echo, dense=dense)
     return _INDEX
 
 
-def retrieve(query, k=None, floor=None, idx=None):
-    """-> the top `k` chunks for `query` with provenance and score, best first; `[]` for a miss.
+def retrieve(query, k=None, floor=None, idx=None, dense_floor=None, turn_id=None, hybrid=None):
+    """-> the top `k` chunks for `query` with provenance and scores, best first; `[]` for a miss.
 
     The function the acceptance criterion names. `idx` is for callers that hold their own index —
-    tests, and the calibration script; left alone it uses the process-wide one.
+    tests, and the calibration script; left alone it uses the process-wide one. `turn_id` joins the
+    query's encoder call to the turn it was made for in runs/calls.jsonl.
     """
-    return (idx or index()).search(query, k=k, floor=floor)
+    return (idx or index()).search(query, k=k, floor=floor, dense_floor=dense_floor,
+                                   turn_id=turn_id, hybrid=hybrid)

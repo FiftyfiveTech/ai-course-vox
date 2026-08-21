@@ -175,10 +175,35 @@ TTS_ARMS = (
         onnx_config="en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"),
 )
 
-ARMS = {"stt": STT_ARMS, "llm": LLM_ARMS, "tts": TTS_ARMS}
-STAGE_ENV = {"stt": "VOX_STT_MODEL", "llm": "VOX_LLM_MODEL", "tts": "VOX_TTS_MODEL"}
+
+# Sentence encoders for the dense half of retrieval. Local, both of them: an embedding runs once per
+# chunk at index time and once per *turn* at query time, so a network hop here would be a network hop
+# inside the latency budget, and the corpus is internal HR policy — it does not leave the machine to
+# be vectorised.
+#
+# `pooling` and `query_prefix` are part of *which model this is*, not tuning: BGE was trained with
+# CLS pooling and an asymmetric query instruction, MiniLM with mean pooling and none. Pooling one
+# the other's way does not degrade it a little, it produces vectors from a space the model was never
+# trained to put anything in.
+EMBED_ARMS = (
+    Arm(repo_id="BAAI/bge-small-en-v1.5", provider="local",
+        provider_model="BAAI/bge-small-en-v1.5", backend="transformers-embed", alias="bge-small",
+        pooling="cls", dim=384,
+        query_prefix="Represent this sentence for searching relevant passages: "),
+    # No prefix and mean pooling — the symmetric alternative, and the smaller download. Kept as an
+    # arm rather than a comment so the choice is measurable: `LLM=... make ...` has an equivalent
+    # here, and two encoders' numbers can be put side by side the way VOX-013 puts arms side by side.
+    Arm(repo_id="sentence-transformers/all-MiniLM-L6-v2", provider="local",
+        provider_model="sentence-transformers/all-MiniLM-L6-v2", backend="transformers-embed",
+        alias="minilm", pooling="mean", dim=384, query_prefix=""),
+)
+
+ARMS = {"stt": STT_ARMS, "llm": LLM_ARMS, "tts": TTS_ARMS, "embed": EMBED_ARMS}
+STAGE_ENV = {"stt": "VOX_STT_MODEL", "llm": "VOX_LLM_MODEL", "tts": "VOX_TTS_MODEL",
+             "embed": "VOX_EMBED_MODEL"}
 
 DEFAULT_STT, DEFAULT_LLM, DEFAULT_TTS = STT_ARMS[0], LLM_ARMS[0], TTS_ARMS[0]
+DEFAULT_EMBED = EMBED_ARMS[0]
 
 # --- where each stage runs -------------------------------------------------------------------
 # The architecture, written down as something that can fail a test. Until this table existed the
@@ -190,11 +215,19 @@ DEFAULT_STT, DEFAULT_LLM, DEFAULT_TTS = STT_ARMS[0], LLM_ARMS[0], TTS_ARMS[0]
 #   stt   remote — the local `base` arms drop the first word of the fixture (see ARCHITECTURE.md)
 #   llm   remote — the widest quality gap of the four, and the least tolerable to lose
 #   tts   local — no key, no quota, and the arm is already good enough to ship
-PIPELINE = {"vad": "local", "stt": "remote", "llm": "remote", "tts": "local"}
+#   embed local — once per chunk at index time and once per turn at query time; and the corpus is
+#         internal policy, so vectorising it remotely would be the disclosure the gitignore avoids
+PIPELINE = {"vad": "local", "stt": "remote", "llm": "remote", "tts": "local", "embed": "local"}
 
 # Where a stage goes when its arm fails in a way another arm could survive. Every value must name
 # a *local* arm on the same stage; tests/unit/test_fallback.py asserts exactly that, because a
 # fallback that is itself remote would fail for the same reason the primary just did.
+#
+# `embed` deliberately has none. A fallback encoder would answer the query in a *different vector
+# space* from the one the cached chunk vectors live in, so every cosine it produced would be
+# arithmetic between two unrelated bases — not a degraded answer, a meaningless one. If the encoder
+# cannot load, the dense half is skipped and BM25 answers alone; that is in src/retrieval.py, not
+# here, because it is not a substitution.
 FALLBACKS = {"stt": "faster-base", "llm": "llama-3.2-3b", "tts": "speecht5"}
 
 # --- named architectures (VOX-013) -----------------------------------------------------------
@@ -292,6 +325,27 @@ VAD_SILENCE_MS        = _ep.get("silence_ms",        1_100)
 BARGE_MIN_SPEECH_MS   = _bi.get("min_speech_ms",     200)
 BARGE_SPEECH_THRESHOLD = _bi.get("speech_threshold", 0.7)
 
+# --- session length (`make demo`) ------------------------------------------------------------
+# How long a conversational run lasts when it is bounded by the clock rather than by a turn count.
+# Three minutes is a demo: long enough to ask a few things, talk over one of them, and hear the
+# session end by itself. Env-configurable because a dev iterating on a stage wants one or two turns
+# and not three minutes of talking:
+#
+#   VOX_SESSION_MINUTES=0.5 make demo
+#
+# The deadline is only ever checked between turns (src.loop.Budget), so a run overruns by at most
+# one reply — a value smaller than a turn takes means one turn, not a truncated one.
+SESSION_MINUTES = float(os.environ.get("VOX_SESSION_MINUTES", "3"))
+
+# How many consecutive listens may hear nothing before a timed session gives up. A pause inside a
+# conversation is not the end of it, so silence does not stop a timed run the way it stops a
+# `--turns` one — but a muted mic, an unplugged headset or a device the OS handed to something else
+# all look exactly like a thoughtful pause, and without a bound they would spin quietly for the
+# whole three minutes and blame the user for saying nothing. Two, because vad.listen waits 30 s each
+# time: a minute of silence is a broken mic or a person who has walked away, and both want the same
+# answer. Set it to 1 to get the old "silence ends the run" behaviour inside a timed session.
+SESSION_QUIET_LIMIT = int(os.environ.get("VOX_SESSION_QUIET_LIMIT", "2"))
+
 # --- source documents (VOX-029) ---------------------------------------------------------------
 # The PDF corpus the POC answers from, and where the extracted chunks land. Both are gitignored:
 # these are internal HR policies, so the documents and the text pulled out of them are the same
@@ -355,6 +409,82 @@ BM25_B = float(os.environ.get("VOX_BM25_B", "0.75"))
 # miss's, which is exactly what the floor above has to see through. src/retrieval.py's stopword list
 # is the first defence; this is the dial if it is not enough.
 BM25_EPSILON = float(os.environ.get("VOX_BM25_EPSILON", "0.25"))
+
+
+# --- dense retrieval and fusion (hybrid) -------------------------------------------------------
+# Why there is a dense half at all, measured before it was written. BM25 matches terms, not
+# meanings, so on 2026-08-20 a live `make demo` turn asked "how many paternal leaves am I entitled
+# to according to policy" and the one chunk that answers it (leave-policy:p12, "ADDITIONAL LEAVES
+# 1. Paternity Leave") came back at **rank 110 of 137**: `paternal` is not `paternity` and `leaves`
+# is not `leave`, so neither term matched at all. The same target ranks 1 for the query "paternity
+# leave". Three lexical variants of one information need, `scripts/ask.py`:
+#
+#     paternity leave                                                 top-1 0.800   target rank 1
+#     how many paternity leaves am I entitled to                      top-1 0.276   target rank 11
+#     How many paternal leaves am I entitled to according to policy    top-1 0.140   target rank 110
+#
+# That is not a floor that needs moving. It is a scorer that cannot see the question.
+
+# Where the chunk vectors are cached. Gitignored with the chunks they belong to, and keyed by the
+# encoder that made them — vectors from two encoders are not interchangeable, so the file records
+# which arm wrote it and is rebuilt rather than reused when that changes.
+EMBEDDINGS_FILE = Path(os.environ.get("VOX_EMBEDDINGS_FILE", RUNS_DIR / "embeddings.npz"))
+
+# How many chunks are encoded per forward pass at index time. Only affects index-build speed and
+# peak memory; a query is one text and never batches.
+EMBED_BATCH = int(os.environ.get("VOX_EMBED_BATCH", "16"))
+
+# The cosine similarity below which a dense hit is not a hit. The dense analogue of
+# RETRIEVAL_SCORE_FLOOR, and it needs one for the same reason: without it every query returns its
+# five nearest chunks, and "not in these documents" stops being a state the system can be in.
+#
+# It is a *cosine*, so unlike the lexical score it has an absolute scale and does not move with the
+# number of words in the question — which is the whole property the lexical half lacks.
+#
+# MEASURED, 2026-08-20, same 13 dev queries, `scripts/ask.py --calibrate`, and the measurement is
+# NEGATIVE — this number is a compromise and the docs say so rather than implying a gap that is not
+# there:
+#
+#     answerable  min 0.676  max 0.799
+#     absent      min 0.620  max 0.738     <- "how many days of sabbatical leave can I take"
+#
+# NOT separable. An absent query outscores an answerable one, so no cosine floor routes all 13
+# correctly. Three other dense signals were tried and none separates either: the top-1 z-score
+# against the corpus (2.14 | 2.67), its margin over the mean (0.135 | 0.159), and the gap to the
+# 6th best chunk (0.015 | 0.047). A 33M-parameter encoder does not know when it is lost.
+#
+# 0.65 is therefore chosen, not derived: below every answerable query's cosine with 0.026 of margin,
+# and above two of the six absent ones (tuition 0.620, canteen 0.621), which are refused with no
+# model call at all. The other four reach the model and the grounded prompt refuses them there —
+# measured end to end below.
+#
+# The alternative was 0.674, which sits under the weakest answerable query (0.676) and over five of
+# the six absent ones. It was rejected: 0.002 of margin is not a threshold, it is a coincidence that
+# survives until someone rephrases a question. The cost of being wrong on this side is a false
+# refusal to a real employee; the cost on the other side is one free-tier call that ends in the
+# right refusal. Those are not symmetric, and the floor is set accordingly.
+#
+# That is also the design working as written rather than a hole in it: this floor is a cheap
+# pre-filter, and prompts/answer_from_source_v1.md is what actually stops an ungrounded answer.
+DENSE_SCORE_FLOOR = float(os.environ.get("VOX_DENSE_SCORE_FLOOR", "0.65"))
+
+# Reciprocal-rank-fusion constant. A chunk's fused score is sum over the two rankings of
+# 1/(RRF_K + rank), so the two halves are combined by *rank* and never by score — a BM25 fraction
+# and a cosine are different units, and adding them with weights would be inventing an exchange
+# rate between them. 60 is the value the RRF paper uses; it flattens the difference between rank 1
+# and rank 2 relative to the difference between rank 1 and rank 20, which is the behaviour wanted
+# when one half is confident and the other has no idea.
+RRF_K = float(os.environ.get("VOX_RRF_K", "60"))
+
+# How many candidates each half contributes to the fusion before the top-k cut. Wider than
+# RETRIEVAL_TOP_K on purpose: a chunk the dense half ranks 8th and BM25 ranks 3rd should be able to
+# win, and it cannot if each half only ever offers five.
+FUSION_CANDIDATES = int(os.environ.get("VOX_FUSION_CANDIDATES", "20"))
+
+# Whether the dense half runs at all. Off means BM25 alone — exactly VOX-030's behaviour, kept
+# reachable because it is the baseline every hybrid number is measured against, and because it is
+# the fallback when the encoder cannot load (no weights on this machine, no network on first run).
+HYBRID_RETRIEVAL = os.environ.get("VOX_HYBRID_RETRIEVAL", "1") not in ("0", "false", "False", "")
 
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
