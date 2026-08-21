@@ -208,3 +208,68 @@ Lessons:    (1) The grounded-answer rate is the ticket's title and the weakest o
             (5) Still open: n=2 on the refusal side. Two absent queries cover both refusal paths,
             which is the right design, but a refusal "rate" over two samples has three possible
             values. Widening it needs more written queries, not a different metric.
+
+## VOX-028 — MVP freeze (2026-08-21, Ritika as Builder)
+
+Executed:   The documentation half of the freeze. README rewritten from the template scaffold it
+            still was into the repo's front door: a developer note naming the four things about
+            this clone that surprise people, a "what to expect" section that leads with the missed
+            latency target, system requirements, a required / degrades-a-stage / blocks-one-command
+            split for software, getting-started for both the plain and the grounded path, the full
+            env-var sample, the HF repo-id arm table, the gating table and the latency-budget table
+            — each table naming the `ARCHITECTURE.md` section it was copied from. `.env.example`
+            extended from 3 names to every knob in `src/config.py`, with the tunables commented out
+            so `config.py` stays the single source of defaults. Week report written to
+            `notes/build-log/VOX/week-report.md`: the numbers with their commands, three findings,
+            six items of gate debt, and the retro. Concept primer first, as the learning loop asks.
+
+Deviations: (1) The ticket says "README with HF repo ids, the gating table and the latency-budget
+            table". The delivered README is much larger than that, because the ticket's own Done
+            condition is "a clean clone reproduces the demo" — and a clean clone *cannot* reproduce
+            the grounded half at all (gitignored corpus), needs a system package for three of the
+            four gates, and re-resolves its own dependency graph. Those are facts a stranger has to
+            read before the three tables mean anything, so they go above them.
+            (2) `make gate` was left broken rather than fixed. It exits 5 with "no tests ran"
+            because all four gates expose `main()` and pytest collects nothing. Fixing it means
+            deciding what a gate does when it has no key, no audio or no corpus — a decision, at
+            the moment of freezing, about what the word "gate" asserts. It is documented in the
+            README's gating table and is item 3 of the gate debt instead.
+            (3) `gate_phase1b.py` was on `origin/dev` (PR #24) and not on the branch this ticket
+            started from, so the first draft of the gating table said "not written". Merged `dev`
+            in and corrected it: the script exists, prints its numbers, and asserts **no**
+            threshold — VOX-024 is the ticket that sets one and is still open. That is a different
+            debt from a missing file and is written up as one.
+            (4) The tag is not pushed by this ticket. `mvp-v1` has to point at a reviewed commit on
+            `dev`, and this work is on `feat/vox-028` awaiting review — tagging a branch tip is a
+            self-merge with extra steps, which is exactly what finding (2) below is about.
+
+Numbers:    `uv run pytest tests/unit -q` -> **313 passed in 6.63s** (2026-08-21).
+            `make gate` -> `no tests ran in 0.01s`, `make: *** [Makefile:69: gate] Error 5`.
+            `gh pr list --state merged --limit 40 --json number,author,mergedBy` -> **17 of 23
+            merged PRs have author == mergedBy.** 6 of the first 6 were reviewed by a third person;
+            every PR from #8 onward except #14 was self-merged.
+            `git ls-files uv.lock` -> not tracked. `ls tests/gates/` -> no `test_no_leakage.py`.
+            Everything else in the README is a citation, dated and attributed to the command in
+            `ARCHITECTURE.md` that produced it; nothing was re-measured for this ticket except the
+            unit suite and the two checks above.
+
+Lessons:    (1) A freeze measures the *repo*, not the code, and the measurement is embarrassing on
+            purpose. Four separate things this repo deliberately does not track — corpus, lock
+            file, dev WAVs, runs — are each individually correct and together mean a stranger
+            cannot reproduce most of the week's numbers. None of that was visible until someone had
+            to write down what a clean clone can do.
+            (2) The self-merge count is the finding of the week and it is a process finding, not a
+            technical one. The rule held for two days, and it held only because a third person was
+            pressing merge. It decayed silently the moment the pair were merging their own work,
+            and the Friday `git log` check found it five days too late to change a single PR.
+            Enforcement that depends on remembering to check is not enforcement — branch
+            protection on `dev` requiring one approving review is the fix, and it is next week's
+            first task, not a resolution.
+            (3) The cheapest gate is the one that never gets written. `test_no_leakage.py` needs no
+            key, no audio and no corpus, and guards the rule the whole evaluation contract rests
+            on. It was never blocking anything, which is exactly why it is still absent on day 5.
+            Write the free gate first.
+            (4) Two documents beat one, but only with a direction of authority. README says what to
+            run and what to expect; `ARCHITECTURE.md` says why, with the measurement. Stating in
+            the README that `ARCHITECTURE.md` wins, and having every README number name its source
+            section, is what stops the two drifting into disagreement with neither marked wrong.

@@ -4,7 +4,8 @@
 help:
 	@echo "make setup   create the venv and install deps (uv), and pull the local fallback model"
 	@echo "make test    unit tests"
-	@echo "make gate    run every phase gate in tests/gates/"
+	@echo "make gate    NOTE: collects nothing — the gates expose main(), not test_*."
+	@echo "             Run them one by one; the commands are in README.md 'The gating table'"
 	@echo "make demo    talk to it end to end for VOX_SESSION_MINUTES (default 3; needs a mic)"
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
@@ -64,6 +65,11 @@ encoder:
 test:
 	uv run pytest tests/unit -q
 
+# KNOWN BROKEN, and recorded as gate debt at the MVP freeze rather than papered over: all four
+# gates expose main() rather than test_* functions, so pytest collects nothing here and exits 5.
+# The four commands are in README.md § The gating table. Fixing this target means first deciding
+# what a gate does when it has no key, no audio or no corpus — see notes/build-log/VOX/week-report.md,
+# gate debt item 3.
 gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
