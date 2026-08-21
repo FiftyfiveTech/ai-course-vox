@@ -33,3 +33,25 @@ Blocked:  nothing. Found and fixed a real bug on the way: reusing one endpointed
           identical turns. compare now endpoints per turn and asserts the segment is unchanged;
           tests/unit/test_compare.py pins it.
 Next:     VOX-014 — write the phase-1 finding.
+
+## 2026-08-21 — Ritika (Builder)
+Did:      VOX-028, the documentation half of the MVP freeze. README rewritten from the template
+          scaffold into the repo's front door — developer note, what to expect, system requirements,
+          required/optional software, getting started for both the plain and the grounded path, the
+          full env sample, the HF repo-id arm table, the gating table, the latency-budget table, and
+          a known-gaps table. `.env.example` grown from 3 names to every knob in `src/config.py`,
+          tunables commented out so config.py stays the single source of defaults. Week report at
+          `notes/build-log/VOX/week-report.md` with the numbers, three findings, six items of gate
+          debt and the retro. Concept primer written first. Merged `origin/dev` in — `gate_phase1b.py`
+          (PR #24) was not on this branch and the first draft of the gating table was wrong about it.
+Number:   `uv run pytest tests/unit -q` -> 313 passed in 6.63s.
+          `make gate` -> "no tests ran in 0.01s", Error 5 — all four gates expose main(), not test_*.
+          `gh pr list --state merged --limit 40 --json number,author,mergedBy` -> 17 of 23 merged PRs
+          have author == mergedBy. 6 of the first 6 were reviewed by a third person; every PR from
+          #8 onward except #14 was self-merged.
+          `git ls-files uv.lock` -> not tracked. `ls tests/gates/` -> no test_no_leakage.py.
+Blocked:  `mvp-v1` is NOT pushed. The tag has to point at a reviewed commit on `dev`, and this is on
+          `feat/vox-028` awaiting review — tagging a branch tip is a self-merge with extra steps.
+          VOX-028 also depends on VOX-026 (end-to-end execution run) and VOX-027 (demo), both still
+          in Plan Backlog, so this freeze certifies the repo and the docs, not a rehearsed demo.
+Next:     VOX-026 — the end-to-end execution run, on the demo hardware, on headphones.
