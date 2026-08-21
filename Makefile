@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer encoder test gate demo barge turn ground arms compare index ask answer gate-poc board coach clean
+.PHONY: setup fallback-model tokenizer encoder test gate demo dry-run barge turn ground arms compare index ask answer gate-poc board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -7,6 +7,7 @@ help:
 	@echo "make gate    NOTE: collects nothing — the gates expose main(), not test_*."
 	@echo "             Run them one by one; the commands are in README.md 'The gating table'"
 	@echo "make demo    talk to it end to end for VOX_SESSION_MINUTES (default 3; needs a mic)"
+	@echo "make dry-run the scripted 10-turn demo session, no mic — barge-in, confirmations, timings"
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
 	@echo "make turn    one instrumented turn from a recording — no mic needed"
 	@echo "make ground  one grounded turn from a recording — retrieval in the loop (VOX-032)"
@@ -97,6 +98,27 @@ gate:
 # path for a whole run:  uv run python -m src.loop --no-kb
 demo:
 	uv run python -m src.loop --minutes
+
+# VOX-026. The demo, rehearsed: the ten turns in evals/demo/session_v1.json driven end to end with
+# no microphone, including the barge-in whose interrupting utterance becomes the next turn's input,
+# and two confirmations — one confirmed, one cancelled. Prints a per-turn PASS/FAIL against what the
+# script says each turn must do, a timing table, and a run report under runs/rehearsal/. Exits
+# non-zero if any turn missed its expectation, so "it completed clean" is a status code and not an
+# impression.
+#
+# The frames are paced at one every 32 ms, so the VAD_SILENCE_MS hangover is paid in real time and
+# time_to_first_audio is the number a person hears — unlike `make turn`, which reads ~1 s better.
+# Takes about two minutes for that reason. `--fast` drops the pacing for a wiring check.
+#
+# Needs a speaker (time_to_first_audio is unmeasurable without one — the preflight refuses), `make
+# index` for the four grounded turns, and headphones if you are anywhere near the microphone.
+# The user's ten lines are synthesised locally on first run and cached under runs/rehearsal/audio.
+#
+# --no-sync, and it matters: `uv run` alone re-resolves the environment, en-core-web-sm is pinned to
+# a GitHub release URL, and a 504 from GitHub is a failed run before a line of VOX executes. That
+# happened while this target was being written. Run `make setup` when the deps actually change.
+dry-run:
+	uv run --no-sync python scripts/dry_run.py $(ARGS)
 
 # Barge-in (VOX-011). Every turn but the last plays its reply with the mic still open, so talking
 # over VOX stops it mid-sentence, prints the stop latency in ms, and feeds the words that stopped it

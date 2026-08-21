@@ -147,8 +147,9 @@ git clone https://github.com/FiftyfiveTech/ai-course-vox
 cd ai-course-vox
 make setup          # uv sync, write .env from .env.example, pull the tokenizer, encoder and 3B
 # fill in .env — see Sample env below
-make test           # 313 passed in 6.63s (2026-08-21). No network, no key, no mic
+make test           # 337 passed in 9.09s (2026-08-21). No network, no key, no mic
 make turn           # one instrumented turn from a recording. Needs a speaker, no mic
+make dry-run        # the scripted ten-turn session, asserted turn by turn. Needs a speaker, no mic
 make demo           # talk to it. Needs a mic and headphones. Ends on the clock or on Ctrl-C
 ```
 
@@ -174,6 +175,7 @@ has to be visible at load rather than as an empty answer three tickets later.
 | | |
 |---|---|
 | `make demo` | a real conversation, `VOX_SESSION_MINUTES` long (default 3), grounded where the corpus covers it |
+| `make dry-run` | the scripted ten-turn demo session end to end, no mic: a barge-in, two confirmations, a PASS/FAIL per turn and a timing table. ~2 min, because the frames are paced at real time |
 | `make barge` | three turns with interruptible replies — talk over it, it prints the stop latency |
 | `make turn` / `make ground` | one turn from a recording — the plain and the grounded path, no mic |
 | `make arms` | call every registered arm once, print the `calls.jsonl` lines. Fallback off, so a refusal shows on its own row |
@@ -313,7 +315,8 @@ repo id on every call it made.
 | Phase 1B (VOX-023 / VOX-024) | `uv run python tests/gates/gate_phase1b.py` | entity capture rate, confirmation rate on write intents, state validity, per-category breakdown — over `evals/heldout/` | **none yet.** The script prints `PASS — numbers printed`; VOX-024 is the ticket that sets the threshold and is still open | **script written, threshold not set** — see [Known gaps](#known-gaps-and-gate-debt) |
 | POC / PDF (VOX-033) | `make gate-poc` | correct-source@3, refusal rate, grounded-answer rate and its intersection with correct-source | `≥ 7/8` and `refusal = 2/2`; exits non-zero below | **passed** |
 | Leakage (task 0.7) | `tests/gates/test_no_leakage.py` | — | `dev ∩ heldout = ∅` by content hash | **not written** |
-| Unit suite | `make test` | pass count | all pass | **313 passed in 6.63s**, 2026-08-21 |
+| Unit suite | `make test` | pass count | all pass | **337 passed in 9.09s**, 2026-08-21 |
+| Demo rehearsal (VOX-026) | `make dry-run` | per-turn PASS/FAIL against `evals/demo/session_v1.json`, and the five-field split for all ten turns | every turn meets its own expectation; exits non-zero otherwise. **No latency floor** — VOX-003's budget is missed by 4x and is recorded as missed, so a floor here would be a lie or a permanent failure | **clean twice**, 2026-08-21 |
 
 **`make gate` currently runs nothing.** It is `pytest tests/gates`, and these gates expose `main()`
 rather than `test_*` functions, so pytest collects zero tests and exits 5. Run each gate by the

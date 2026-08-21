@@ -273,3 +273,73 @@ Lessons:    (1) A freeze measures the *repo*, not the code, and the measurement 
             run and what to expect; `ARCHITECTURE.md` says why, with the measurement. Stating in
             the README that `ARCHITECTURE.md` wins, and having every README number name its source
             section, is what stops the two drifting into disagreement with neither marked wrong.
+
+---
+
+## VOX-026 — end-to-end execution run (2026-08-21, Vimal as Builder)
+
+Executed:   The demo, rehearsed. `evals/demo/session_v1.json` is the running order as data — ten
+            turns, one barge-in whose interrupting utterance becomes the next turn's input, two
+            confirmations (one confirmed, one cancelled), two refusals of different kinds — and
+            `scripts/dry_run.py` (`make dry-run`) runs it end to end against the real stages with no
+            microphone. Each turn carries an `expect` block asserted against the *turn record*, so
+            "clean" is an exit code rather than an impression, and an `expect` key the checker does
+            not implement is itself a failure. Three seams were opened rather than copied:
+            `vad.drive` is the endpointing loop `listen()` and a recording now share (the barge hook
+            lives inside it), `loop.speak_and_watch` and the new `loop.confirmation_leg` take their
+            listener as an argument, and `vad.paced` feeds frames at one every 32 ms so the
+            VAD_SILENCE_MS hangover is paid in real time. Full report, findings and the demo runbook:
+            `notes/build-log/VOX/vox-026-dry-run.md`.
+
+Deviations: (1) The ticket says "recorded". The user's ten lines are **synthesised** locally by
+            Kokoro (a different voice from the reply's) and cached, so the session runs on any
+            machine with one command — CLAUDE.md's developer-agnostic rule — and a turn can name a
+            `recording` instead when a real voice is wanted. What that buys is reproducibility; what
+            it costs is acoustics, and the report says so: every transcript in it is an upper bound.
+            (2) Three fixes landed that are not in the ticket, all found by running it. The
+            barge-in print used a box-drawing character cp1252 cannot encode, so on this Windows
+            console the interruption worked and *then* the turn died on the line announcing it. The
+            confirmation leg timed its second STT and TTS into `t_stt_ms` / `t_tts_ms`, overwriting
+            the turn's own numbers. And the unit suite was reading `.env`'s demo profile —
+            `VOX_SESSION_QUIET_LIMIT=1` failed three tests in `test_session.py`.
+            (3) Two changes to the demo *script* rather than the code, both recorded in the JSON: q02
+            (leave encashment) was cut because Whisper returns "leaving CashMint" and the turn then
+            answers fluently off the wrong document, and t05 asserts `code-of-ethics:p12` where
+            `pdf_queries` q06 labels p13 — the dress code is on p12 and p13 is the enforcement note,
+            read off `runs/chunks.jsonl`. The label disagreement is handed to the Evaluator, not
+            fixed: q06 is scored by VOX-033's gate.
+            (4) `VOX_STT_FIXUPS=1` is set in `.env` and read by nothing on `dev` — the mechanism is
+            on an unmerged branch. Reported by the preflight on every run rather than fixed.
+
+Numbers:    `make dry-run` twice, consecutively, no edit between them, 2026-08-21:
+            **CLEAN 10/10, exit 0** both times (`runs/rehearsal/run-20260821T164822.json`,
+            `run-20260821T165040.json`).
+            `time_to_first_audio` median **2310 ms** (band 2106-2464) and **2357 ms** (band
+            2025-3317) — paced, so these include the ~1120 ms hangover a fixture run collapses to
+            ~4 ms. `t_llm` median 474 / 525 ms, band 348-741 then 364-**1456**. `t_vad` 1119-1121 ms
+            on all twenty turns. 0/10 fallbacks in both.
+            Barge-in: stopped **226.2 ms** and **227.6 ms** after speech began, cutting 5.3 s of a
+            7.8 s reply, 183 ms of output buffer behind it.
+            Confirmation: t09 `t_tts_ms` **170.5 ms** (the read-back) with `t_confirm_tts_ms`
+            **50.6 ms** (the cancel line) — before the fix the record would have said 50.6.
+            **86 model calls across the two runs, `max(cost_usd) = 0.0`**, every one on a HF repo id
+            at groq / nvidia-nim free tier or local weights.
+            `uv run pytest tests/unit -q` -> **337 passed in 9.09s**, from 3 failed / 310 passed
+            before the conftest fix.
+
+Lessons:    (1) A rehearsal measures the *run*, and the run includes the console. Three of the five
+            things this ticket fixed were invisible from inside a passing unit suite: a print that
+            kills a turn, a timing field written twice, and a gitignored env file changing what the
+            tests assert. None of them are reachable by testing components harder.
+            (2) Two consecutive runs with no edit between them is the whole discipline. The medians
+            agreed to 2% and the *tails* disagreed by 850 ms — one run would have shown either the
+            comfortable number or the alarming one, and reported it as the truth.
+            (3) Inject the seam, never copy the loop. A scripted barge-in built with `sleep()` and
+            `abort()` would have measured the abort path — a few ms — and printed it in VOX-011's
+            field, where silero's detection delay and BARGE_MIN_SPEECH_MS are most of the 226 ms.
+            Passing `listen` into the real function was smaller *and* the only version that measures
+            anything.
+            (4) A knob nobody reads is worse than a missing one, because it is a setting in a file
+            someone will trust under pressure. The cheapest guard is mechanical: compare the names
+            assigned in `.env` against the names appearing in the code, and print the difference
+            before the first turn.

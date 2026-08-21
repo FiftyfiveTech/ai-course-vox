@@ -176,6 +176,48 @@ class Endpointer:
                        self.spoken_s(), round(self.infer_ms, 1))
 
 
+def drive(frames, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None, model=None,
+          max_wait_ms=None, echo=None):
+    """The endpointing decision over any source of frames. -> (Capture or None, state).
+
+    `listen()` is this function over a microphone and `endpoint_frames()` is it over a recording,
+    which is the whole reason it exists: the `on_speech` hook is where barge-in is decided, and a
+    second copy of this loop is exactly how a scripted run (VOX-026) ends up measuring an
+    `abort()` call instead of an interruption. Silero's detection delay and `confirm_ms` are the
+    majority of a VOX-011 stop latency, so a rehearsal that skips them is not rehearsing the
+    feature.
+
+    `max_wait_ms` bounds the silence before speech and is what makes a muted mic return rather
+    than hang; None means the frames themselves are the bound, so a recording ends by running out.
+    `echo` receives the three lines a person at a mic needs to see, and is None for a driven run
+    that is printing its own.
+    """
+    ep = Endpointer(model=model, threshold=threshold)
+    say = echo if echo is not None else (lambda *a, **kw: None)
+    fired = False        # on_speech is once per utterance, not once per frame above the threshold
+
+    for frame in frames:
+        state = ep.push(frame)
+        if state == SPEAKING and len(ep.frames) == 1:
+            fired = False                     # a new utterance after a rearm gets its own hook call
+            say("  speech detected…")
+        elif state == TOO_SHORT:
+            say("  (too short — still listening)")
+        elif state == DONE:
+            return ep.capture(), DONE
+        elif state == WAITING and max_wait_ms is not None and ep.waited_ms >= max_wait_ms:
+            return None, WAITING
+
+        if on_speech is not None and not fired and ep.speech_ms >= confirm_ms:
+            fired = True
+            on_speech(ep.first_speech_t)
+
+    # The frames ran out. Live this is unreachable — a microphone does not end — so it is the
+    # end-of-recording case, and `flush()` decides whether what was collected is a turn.
+    state = ep.flush()
+    return (ep.capture() if state == DONE else None), state
+
+
 def listen(max_wait_s=30, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None,
            announce=True):
     """Block until the user speaks and stops. -> Capture, or None.
@@ -192,53 +234,67 @@ def listen(max_wait_s=30, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, thresh
 
     A rearm after TOO_SHORT clears the mark, so a cough that never reaches `confirm_ms` does not
     fire the hook and the real utterance behind it still can.
-    """
-    ep = Endpointer(threshold=threshold)
-    max_wait_ms = max_wait_s * 1000
-    fired = False        # on_speech is once per utterance, not once per frame above the threshold
 
-    with sd.InputStream(channels=1, samplerate=SAMPLE_RATE, dtype="float32",
-                        blocksize=VAD_FRAME) as stream:
-        if announce:
-            print("listening… speak now.", flush=True)
+    The decision itself is `drive()`. This function is the microphone: opening the device, saying so,
+    and reporting the finished utterance.
+    """
+    def mic_frames(stream):
         while True:
             block, overflowed = stream.read(VAD_FRAME)
             if overflowed:
                 # A dropped frame shifts the endpoint decision, so say so rather than hide it.
                 print("  (audio overflow — a frame was dropped)", file=sys.stderr)
+            yield block[:, 0].copy()
 
-            state = ep.push(block[:, 0].copy())
-            if state == SPEAKING and len(ep.frames) == 1:
-                fired = False                 # a new utterance after a rearm gets its own hook call
-                print("  speech detected…", flush=True)
-            elif state == TOO_SHORT:
-                print("  (too short — still listening)", flush=True)
-            elif state == DONE:
-                break
-            elif state == WAITING and ep.waited_ms >= max_wait_ms:
-                return None
+    with sd.InputStream(channels=1, samplerate=SAMPLE_RATE, dtype="float32",
+                        blocksize=VAD_FRAME) as stream:
+        if announce:
+            print("listening… speak now.", flush=True)
+        cap, _ = drive(mic_frames(stream), on_speech=on_speech, confirm_ms=confirm_ms,
+                       threshold=threshold, max_wait_ms=max_wait_s * 1000,
+                       echo=lambda line: print(line, flush=True))
 
-            if on_speech is not None and not fired and ep.speech_ms >= confirm_ms:
-                fired = True
-                on_speech(ep.first_speech_t)
-
-    cap = ep.capture()
+    if cap is None:
+        return None
     print(f"  endpointed: {len(cap) / SAMPLE_RATE:.2f}s of audio "
           f"({cap.spoken_s:.2f}s of speech, t_vad {cap.t_vad_ms:.0f}ms)", flush=True)
     return cap
 
 
-def endpoint_frames(frames, model=None):
+def endpoint_frames(frames, model=None, **kw):
     """Drive the same Endpointer from an iterable of frames. Used to test the decision offline.
 
-    -> (Capture, state). Not part of the live path; `listen()` is what `make demo` calls.
+    -> (Capture, state). Not part of the live path; `listen()` is what `make demo` calls. Keyword
+    arguments are `drive()`'s — `on_speech` and `threshold` are what a scripted barge-in needs.
     """
-    ep = Endpointer(model)
-    for frame in frames:
-        if ep.push(frame) == DONE:
-            return ep.capture(), DONE
-    state = ep.flush()
-    return (ep.capture() if state == DONE else None), state
+    return drive(frames, model=model, **kw)
+
+
+def paced(frames, echo=None):
+    """Yield frames at real time: one VAD_FRAME every 32 ms of wall clock (VOX-026).
+
+    Unpaced, a recording collapses the `VAD_SILENCE_MS` hangover to silero compute — ~4 ms against
+    the ~1.1 s a person at a mic actually waits out — so every fixture-driven
+    `time_to_first_audio` in this repo is optimistic by about a second. Pacing pays that second in
+    the same code, which is what makes a rehearsal number comparable with a live one.
+
+    Timed against an absolute deadline rather than by sleeping a fixed interval per frame: silero's
+    own compute is ~1-4 ms a frame, and sleeping 32 ms *plus* that drifts slower than real time,
+    which would land in `t_vad` as latency nobody spent.
+    """
+    period = VAD_FRAME / SAMPLE_RATE
+    t0 = time.perf_counter()
+    behind_ms = 0.0
+    for i, frame in enumerate(frames):
+        wait = (t0 + i * period) - time.perf_counter()
+        if wait > 0:
+            time.sleep(wait)
+        else:
+            behind_ms = max(behind_ms, -wait * 1000)
+        yield frame
+    if behind_ms > period * 1000 and echo is not None:
+        # The machine could not keep up with real time, so the pacing is not what was measured.
+        echo(f"  (pacing fell {behind_ms:.0f}ms behind real time — t_vad is not a live number)")
 
 
 def frames_from(audio):

@@ -14,6 +14,11 @@ Read `t_vad` and `time_to_first_audio` from a fixture turn with care. Frames arr
 CPU can push them, so the `VAD_SILENCE_MS` hangover a person at a mic actually waits out collapses
 to silero compute — roughly a second the live loop pays and this does not. `source` on the turn
 record says which kind of run produced it, so the two cannot be quietly averaged.
+
+`paced=True` is the exception, and it exists for the rehearsal (VOX-026): the frames are fed in at
+one every 32 ms of wall clock, so the hangover is paid by the same code a person waits for and the
+two numbers above become the live ones with the microphone removed. It is off by default because
+every other caller here is measuring model stages and would only be paying for the clip's duration.
 """
 from collections import namedtuple
 
@@ -31,8 +36,11 @@ from src.telemetry import new_turn_id, turn_timer
 # `reply` is the text that was spoken either way; `answer` is the VOX-031 Answer when the turn took
 # the grounded path and None when it took the plain one, so a caller can see which ran without
 # re-deriving it. Appended last with a default, so every existing positional caller is unaffected.
-TurnRun = namedtuple("TurnRun", "record turn_id capture transcript reply speech answer")
-TurnRun.__new__.__defaults__ = (None,)
+#
+# `carried` is the utterance captured while this reply was playing, when the caller asked for a
+# watched reply (VOX-026). None on every ordinary turn, and on a watched one where nobody spoke.
+TurnRun = namedtuple("TurnRun", "record turn_id capture transcript reply speech answer carried")
+TurnRun.__new__.__defaults__ = (None, None)
 
 
 class NoSpeech(RuntimeError):
@@ -53,10 +61,33 @@ def load_16k_mono(path):
 
 
 def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=None, echo=None,
-                 segment=None, idx=None):
+                 segment=None, idx=None, plain=None, paced=False, watch=None, after_play=None,
+                 extra=None):
     """Run one turn on `clip` with the arms in `chosen`. -> TurnRun.
 
     `chosen` maps stage -> Arm, exactly as `arms.select()` returns it.
+
+    The last four arguments are what a scripted session needs (VOX-026) and no other caller passes:
+
+    `plain` is `answer_mod.turn_reply`'s hook of the same name, passed straight through. Without it
+    the un-retrieved path is `nlu.reply` and there is no `TurnState`, so nothing can ask for
+    confirmation — which is why `make turn` has never shown VOX-020.
+
+    `paced` feeds the endpointer one frame every 32 ms of wall clock instead of as fast as the CPU
+    allows, so the `VAD_SILENCE_MS` hangover is paid in real time and `t_vad` / `time_to_first_audio`
+    become the live numbers rather than the optimistic ones this docstring warns about below.
+
+    `watch` is a listener, and passing one plays the reply interruptibly through
+    `loop.speak_and_watch` — the live barge-in path, not a copy of it. Whatever it captures comes
+    back as `TurnRun.carried`, for the next turn to run on exactly as the loop does.
+
+    `after_play(turn, turn_id, chosen)` runs inside the turn timer once the reply has been spoken.
+    It is where a scripted run puts `loop.confirmation_leg`, so the yes/no exchange is timed on this
+    turn's record and the *policy* about which turn confirms stays out of the harness.
+
+    `extra` is stamped onto the turn record as-is — facts the caller knows and this function cannot,
+    such as `input="carried-in"` for a turn running on audio captured during the previous reply.
+    `src/loop.py` writes that same field for the same reason.
 
     `fallback` is passed straight through to all three `arms.*` calls, and it is the one argument a
     caller has to think about. The loop wants True: a rate limit should cost the quality, not the
@@ -100,11 +131,14 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
     try:
         with turn_timer(turn_id, source=source) as turn:
             turn.arms(**chosen)
+            turn.extra.update(extra or {})
             notify = turn.fallback if on_fallback is None else on_fallback
 
             cap = segment
             if cap is None:
-                cap, state = vad.endpoint_frames(vad.frames_from(clip))
+                frames = vad.frames_from(clip)
+                cap, state = vad.endpoint_frames(
+                    vad.paced(frames, echo=say) if paced else frames)
                 if cap is None:
                     raise NoSpeech(f"endpointer found no turn in {source} (state={state})")
                 say(f"endpointed: {len(cap) / SAMPLE_RATE:.2f}s ({cap.spoken_s:.2f}s speech), "
@@ -126,7 +160,7 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
             # changes behaviour: `scripts/compare_arms.py` still times the plain reply path.
             answered = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
                                              model_id=chosen["llm"].id, on_fallback=notify,
-                                             fallback=fallback)
+                                             fallback=fallback, plain=plain)
             reply = answered.text
             say(f"vox says : {reply!r}")
 
@@ -134,12 +168,24 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
                 speech = arms.tts(reply, chosen["tts"].id, turn_id=turn_id,
                                   on_fallback=notify, fallback=fallback)
 
-            if play:
+            carried = None
+            if play and watch is not None:
+                # Borrowed from the loop rather than reimplemented: the stop latency, the mark it is
+                # measured from and the carry-forward are VOX-011's and belong in one place. Imported
+                # here and not at module scope to keep the direction of this module's dependencies as
+                # its own docstring states them — the mic lives over there.
+                from src import loop
+                say("speaking… (interruptible)")
+                carried = loop.speak_and_watch(turn, speech, listen=watch)
+            elif play:
                 say("speaking…")
                 audio_out.play(speech.audio, sample_rate=speech.sample_rate,
                                on_first_audio=turn.first_audio)
             else:
                 say("(not playing: time_to_first_audio will be null)")
+
+            if after_play is not None:
+                after_play(turn, turn_id, chosen)
     except Exception as e:
         # `turn` is bound by the `with` before its body runs, so the record is reachable here even
         # though the body did not finish. turn_timer already wrote it, error included.
@@ -147,4 +193,4 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
         e.turn_id = turn_id
         raise
 
-    return TurnRun(turn.written, turn_id, cap, transcript, reply, speech, answered.answer)
+    return TurnRun(turn.written, turn_id, cap, transcript, reply, speech, answered.answer, carried)
