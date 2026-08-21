@@ -68,7 +68,12 @@ def score_utterance(gold: dict, extracted: dict) -> dict:
         if field not in extracted:
             slot_results[field] = "miss"
         else:
-            norm_ext = normalise_value(extracted[field])
+            ext_val = extracted[field]
+            # Gold may be a single-element list (e.g. person: ["kiran"]) while the model
+            # returns a scalar. Coerce scalar → list so "kiran" matches ["kiran"].
+            if isinstance(gold_val, list) and not isinstance(ext_val, list):
+                ext_val = [ext_val]
+            norm_ext = normalise_value(ext_val)
             if norm_ext == norm_gold:
                 slot_results[field] = "correct"
                 correct += 1
