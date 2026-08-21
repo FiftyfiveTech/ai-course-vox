@@ -55,3 +55,28 @@ Blocked:  `mvp-v1` is NOT pushed. The tag has to point at a reviewed commit on `
           VOX-028 also depends on VOX-026 (end-to-end execution run) and VOX-027 (demo), both still
           in Plan Backlog, so this freeze certifies the repo and the docs, not a rehearsed demo.
 Next:     VOX-026 — the end-to-end execution run, on the demo hardware, on headphones.
+
+## 2026-08-21 — Vimal (Builder)
+Did:      VOX-026. `make dry-run` runs the scripted ten-turn demo session end to end with no mic:
+          `evals/demo/session_v1.json` holds the running order as data, each turn carries an
+          `expect` block asserted against the turn record, and the run exits non-zero if any turn
+          missed it. Includes the barge-in whose interrupting utterance becomes the next turn's
+          input, and two confirmations — one confirmed, one cancelled. Frames are paced at one every
+          32 ms, so `t_vad` is the live hangover and not the ~4 ms a fixture run collapses it to.
+          Three bugs fixed on the way, all found by running it: the barge-in print used a character
+          cp1252 cannot encode and killed the turn *after* the interruption worked; the confirmation
+          leg timed its second STT/TTS over the turn's own `t_stt_ms`/`t_tts_ms`; and the unit suite
+          was reading `.env`'s demo profile. Report and demo runbook:
+          `notes/build-log/VOX/vox-026-dry-run.md`.
+Number:   `make dry-run` twice, consecutive, no edit between: CLEAN 10/10, exit 0 both.
+          time_to_first_audio median 2310 ms (2106-2464) and 2357 ms (2025-3317), paced.
+          barge-in stopped 226.2 / 227.6 ms after speech began, cutting 5.3 s of a 7.8 s reply.
+          0/10 fallbacks both runs. 86 calls, max(cost_usd) = 0.0.
+          `uv run pytest tests/unit -q` -> 337 passed in 9.09s (was 3 failed / 310 passed on this
+          machine before the conftest fix; the week report's 313 was measured without the demo
+          profile in `.env`).
+Blocked:  nothing. Two things handed on rather than fixed here: `evals/dev/pdf_queries.json` q06 may
+          be labelled a page late (the dress code is on code-of-ethics p12; p13 is the enforcement
+          note) — that is a gate number and belongs to the Evaluator; and `VOX_STT_FIXUPS=1` is set
+          in `.env` and read by nothing on `dev`, so the preflight warns about it every run.
+Next:     VOX-027 — the demo itself, off this script.

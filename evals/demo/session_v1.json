@@ -1,0 +1,116 @@
+{
+  "version": "session_v1",
+  "_note": [
+    "VOX-026. The scripted demo session: ten turns, one barge-in, two confirmations. Driven by",
+    "scripts/dry_run.py, which runs it end to end with no microphone and asserts every `expect`.",
+    "",
+    "This is NOT an eval split. It is a rehearsal script — the running order of a demo, written",
+    "down so the same session can be run twice and compared. Four of the questions are copies of",
+    "evals/dev/pdf_queries.json (q05, q04, q02, q06, q09, q10 by their ids there), which means",
+    "nothing here bounds how much the system was tuned to them: they were chosen *because* they",
+    "are known-good, which is what a demo wants and what an eval must never be. Any number this",
+    "file produces is a dev number and the report says so.",
+    "",
+    "evals/heldout/ is untouched by this file. Nothing here is drawn from it, and a rehearsal is",
+    "not a gate — it prints latencies and a pass/fail per turn, not a score.",
+    "",
+    "`say` is the user's line. It is synthesised locally (see scripts/dry_run.py --user-voice) into",
+    "a cached wav and handed to the real STT stage, so the run needs no person and no mic. Put a",
+    "path in `recording` instead and that file is used verbatim — which is how a real recorded",
+    "voice replaces a synthetic one for the demo-machine rehearsal.",
+    "",
+    "Ordering is deliberate. t02-t03 are the two clean grounded answers you open with. t04 is the",
+    "long one, so there is something to interrupt, and its interruption becomes t05's input the way",
+    "the live loop carries it. t06 and t07 are the two different refusals — floor-rejected and",
+    "model-refused — because a demo that only shows answers has not shown the interesting half.",
+    "t08 confirms and proceeds, t09 confirms and cancels. t10 ends on the escalation path, which is",
+    "the honest note to end an internal assistant demo on."
+  ],
+  "turns": [
+    {
+      "id": "t01",
+      "kind": "ask",
+      "say": "hello Vox, are you there?",
+      "expect": { "path": "plain", "intent_in": ["greet"] },
+      "why": "Opens the session and proves the chain end to end before anything harder. No document covers a greeting, so it is the plain reply path by construction."
+    },
+    {
+      "id": "t02",
+      "kind": "ask",
+      "say": "how many maternity leaves does a woman employee get",
+      "expect": { "path": "grounded", "sources_any": ["leave-policy:p15"] },
+      "why": "pdf_queries q05 — the control. A clean single-page answer in the largest document; if this one is not grounded, the index is wrong and the demo stops here."
+    },
+    {
+      "id": "t03",
+      "kind": "ask",
+      "say": "what are the standard office working hours and shift timings",
+      "expect": { "path": "grounded", "sources_any": ["attendance-policy:p4"] },
+      "why": "pdf_queries q04. The answer is nothing but figures, so it is the turn that exercises answer.ungrounded_numbers() on a reply that must be allowed to state numbers."
+    },
+    {
+      "id": "t04",
+      "kind": "barge",
+      "say": "what happens to my laptop if I resign before two years of allotment",
+      "barge_with": {
+        "say": "actually, what is the dress code in the office",
+        "after_s": 2.0
+      },
+      "expect": {
+        "path": "grounded",
+        "sources_any": ["assets-policy:p14"],
+        "barged_in": true
+      },
+      "why": "pdf_queries q07: a conditional answer rather than a lookup, so it is long enough to be worth interrupting. after_s is when the user starts talking over the reply; it has to be shorter than the reply and longer than the output buffer, or abort() cuts nothing and the barge-in is a silent non-event.",
+      "not_q02": "This turn was written as q02 (privilege leave encashment) and the first dry run cut it. Whisper returned 'How is my privilege leaving CashMint calculated when I leave the company?' from a clean synthetic voice — the same damage ARCHITECTURE.md records from a live turn, where 'leave encashment' came back as 'leaving cashment'. Retrieval then returned leave-policy p9/p11 instead of separation-policy p13/p26, and the turn answered fluently from the wrong document. It is q03 in pdf_queries.json for exactly this reason, and it is not a question to ask in front of an audience while VOX_STT_BIAS is off."
+    },
+    {
+      "id": "t05",
+      "kind": "carried",
+      "expect": {
+        "path": "grounded",
+        "sources_any": ["code-of-ethics-business-conduct:p12"],
+        "input": "carried-in"
+      },
+      "why": "No `say` of its own: this turn runs on the audio that interrupted t04, exactly as the live loop's `pending` does. That is the half of VOX-011 a recording usually cannot show.",
+      "label_note": "p12, not the p13 that evals/dev/pdf_queries.json labels for the same question. The dress code itself is on p12 — chunk 16 is 'The same dress code applies to remote working in office' and chunk 17 is the men's and women's wear lists — while p13 carries only the note about what happens to someone who violates it. That was read off runs/chunks.jsonl before this label was written, which is the rule pdf_queries.json states for its own labels. The disagreement is reported to the Evaluator rather than fixed here: q06's label is scored by VOX-033's gate and changing it changes a gate number, which is not this ticket's to change."
+    },
+    {
+      "id": "t06",
+      "kind": "ask",
+      "say": "what is the health insurance coverage amount for my family",
+      "expect": { "path": "plain", "retrieved": 0, "intent_in": ["unknown", "clarify"] },
+      "why": "pdf_queries q10, the floor-rejected absent query: nothing clears RETRIEVAL_SCORE_FLOOR, so the turn takes the plain path and the extractor answers it. `intent_in` is the assertion that matters — a corpus miss must come back as not-knowing, not as a confident invention."
+    },
+    {
+      "id": "t07",
+      "kind": "ask",
+      "say": "how many days of paid menstrual leave does the company give",
+      "expect": { "path": "refused", "retrieved_min": 1 },
+      "why": "pdf_queries q09, the other refusal and the expensive one: it clears the floor on leave-policy chunks about other leave types, so the model has to refuse from excerpts that look relevant. `grounded` false with `retrieved` non-zero is exactly that event on the record."
+    },
+    {
+      "id": "t08",
+      "kind": "ask",
+      "say": "book a one hour meeting with Priya tomorrow at three p.m.",
+      "confirm_with": "yes, go ahead",
+      "expect": { "path": "plain", "confirmation": "yes" },
+      "why": "VOX-020. A request, not a question — retrieval does not claim it, so the extractor runs and asks for confirmation with the details read back. Nothing is written by a yes: the ticket's constraint is no real account changes, and the confirmed branch is a print."
+    },
+    {
+      "id": "t09",
+      "kind": "ask",
+      "say": "log four hours on the VOX project for today",
+      "confirm_with": "no, cancel that",
+      "expect": { "path": "plain", "confirmation": "no" },
+      "why": "The same gate answered the other way, because a confirmation you can only say yes to is not a gate. The cancel reply is spoken, so this turn has a second TTS call — timed as t_confirm_tts_ms and not over the top of the read-back's t_tts_ms."
+    },
+    {
+      "id": "t10",
+      "kind": "ask",
+      "say": "I need to escalate this to the engineering lead",
+      "expect": { "path": "plain", "intent_in": ["escalate"] },
+      "why": "Ends on the path that hands a person to a person. An internal assistant that cannot say 'this is not mine to answer' is the one nobody trusts, and it is a one-line demo of the escalate intent that costs no corpus and no confirmation."
+    }
+  ]
+}
