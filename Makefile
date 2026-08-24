@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer encoder test gate demo dry-run barge turn ground arms compare index ask answer gate-poc board coach clean
+.PHONY: setup fallback-model tokenizer encoder test gate demo dry-run barge turn ground arms compare index ask answer gate-poc gate-followup gate-figures gate-trick board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -205,6 +205,34 @@ floors:
 # because these gates expose main() rather than test_* functions. Run directly, as their docstrings say.
 gate-poc:
 	uv run python tests/gates/gate_poc_pdf.py
+
+# VOX-034 part A. Every (first question, follow-up) pair in evals/dev/followup_queries.json scored as
+# correct-source@3 on the FOLLOW-UP turn, twice — history off, then history on — so the claim is an
+# A/B and not an assertion. Retrieval only for the referential and self-sufficient groups, so those
+# need no key and no network; the two absent-follow-up cases are scored on the ANSWER refusing and
+# cost one free-tier call each.
+#
+# Reads evals/dev only. heldout-v1 holds zero document queries and is not reopened for it, and both
+# sides of VOX-034 were written by the same agent — the gate prints that limit next to the numbers.
+gate-followup:
+	uv run python tests/gates/gate_followup.py
+
+# VOX-034 part B. evals/dev/figure_queries.json through the same retrieval and answer path the loop
+# runs. TWO numbers, never averaged: accuracy over the computable cases, and refusal rate over the
+# ones with a missing operand. A system that computes eagerly scores well on the first and badly on
+# the second, so only the pair tells it apart from one that is careful. Both floors are 1.0 — a wrong
+# computed figure is a person told the wrong number about their own pay.
+gate-figures:
+	uv run python tests/gates/gate_figures.py
+
+# VOX-034 part C. evals/dev/trick_queries.json, scored per category and never averaged. Traps
+# (false premise, leading, contradiction across turns), out-of-scope probing, and the controls that
+# catch over-correction — an assistant that has learned to challenge premises must still answer a
+# plain question plainly. No LLM judge: a judge inside the measurement is a second unmeasured
+# decision, so the traps are scored on whether the reply asserts the correct figure and not the
+# false one, and cases with no separable figure are reported rather than scored.
+gate-trick:
+	uv run python tests/gates/gate_trick.py
 
 # VOX-031. The same retrieval, then the chunks that cleared the floor go to the LLM arm with
 # prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.

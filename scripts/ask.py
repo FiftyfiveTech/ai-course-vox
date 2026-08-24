@@ -306,6 +306,12 @@ def main():
     ap.add_argument("--answer", action="store_true",
                     help="also send the retrieved chunks to the LLM arm for a grounded answer "
                          "(VOX-031). This is the only path here that makes a model call.")
+    ap.add_argument("--first", metavar="QUESTION", default=None,
+                    help="ask QUESTION first and keep it as conversation history, so the main "
+                         "query is answered as a FOLLOW-UP (VOX-034). This is the only text-mode "
+                         "way to exercise the ellipsis rewrite: without a preceding turn a "
+                         "fragment has nothing to refer back to. Costs one extra model call when "
+                         "combined with --answer.")
     ap.add_argument("--llm", metavar="MODEL_ID", default=None,
                     help="which LLM arm answers, as an HF repo id or alias; default "
                          f"{DEFAULT_LLM.repo_id}. Only used with --answer.")
@@ -336,6 +342,56 @@ def main():
 
     if args.calibrate:
         return calibrate(idx)
+
+    # VOX-034: seed history with a first turn so the query below is a follow-up. The first turn is
+    # answered for real rather than faked, because the plain path and the trick-question cases both
+    # depend on what was actually said — and `retrieval_query()` reads questions, so a hollow reply
+    # would change nothing about the rewrite but would misrepresent the transcript.
+    hist = None
+    if args.first:
+        from src import history as history_mod
+        hist = history_mod.History()
+        print(f"\nfirst      {args.first!r}   (seeding conversation history)")
+        first_hits = retrieval.retrieve(args.first, k=args.k, floor=args.floor, idx=idx,
+                                        dense_floor=args.dense_floor)
+        reply = ""
+        if args.answer and first_hits:
+            got = answer_mod.answer(args.first, telemetry.new_turn_id(), hits=first_hits,
+                                    model_id=args.llm)
+            reply = got.text
+            print(f"           -> {' '.join(reply.split())}")
+        else:
+            print(f"           -> ({len(first_hits)} chunk(s) retrieved; "
+                  f"no reply generated without --answer)")
+        hist.add(args.first, reply,
+                 sources=[h.source for h in first_hits], grounded=bool(reply))
+
+    if hist:
+        turn_id = telemetry.new_turn_id()
+        hits, asked, rewrite = answer_mod.retrieve_with_history(
+            query, turn_id, idx=idx, history=hist, k=args.k, floor=args.floor)
+        print(f"\nfollow-up  {query!r}")
+        print(f"elliptical {hist.elliptical(query)}   "
+              f"(an opener or an anaphor is what triggers the rewrite)")
+        if rewrite is None:
+            print("rewrite    not attempted — this reads as a whole question")
+        else:
+            print(f"rewrite    trigger={rewrite['trigger']} used={rewrite['used']}")
+            print(f"           {rewrite['query']!r}")
+        if not hits:
+            print("\nnothing found — neither the fragment nor the resolved question cleared "
+                  "the floor. Not in the documents.")
+        else:
+            width = max(len(h.source) for h in hits)
+            print(f"\n  {'#':<3}{'lex':>6}{'cos':>7}  {'source':<{width}}  chunk  text")
+            for rank, h in enumerate(hits, start=1):
+                cos = "     -" if h.dense is None else f"{h.dense:>7.3f}"
+                print(f"  {rank:<3}{h.score:>6.3f}{cos}  {h.source:<{width}}  "
+                      f"{h.chunk_idx:>5}  {snippet(h.text, 60)}")
+        if args.answer:
+            return answer(asked, hits, args.llm)
+        return 0
+
     hits = ask(idx, query, args.k, args.floor, args.dense_floor)
     if args.answer:
         return answer(query, hits, args.llm)

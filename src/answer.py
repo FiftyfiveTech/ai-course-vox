@@ -64,15 +64,20 @@ import sys
 from collections import namedtuple
 from contextlib import contextmanager
 
-from src import nlu, retrieval
-from src.config import PROMPTS_DIR
+from src import figures, nlu, retrieval
+from src.config import PROMPTS_DIR, RETRIEVAL_TOP_K
 
 # v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
 # answered "you will be paid 12,000" to a leave-encashment question whose excerpt gave a formula and
-# no such number — cited, fluent and wrong. Versioned as a new file rather than edited in place
-# (VOX-018): the old prompt is what the numbers in ARCHITECTURE.md were measured against, and a
-# prompt you can no longer read is a measurement you can no longer reproduce.
-PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v2.md"
+# no such number — cited, fluent and wrong. v3 (VOX-034) adds one thing the guard provably cannot
+# do: correct a false premise. "Your 30 days of paternity leave" has every number traced — 30 is the
+# advance-notice window in the chunk beside the five-day entitlement — so ungrounded_numbers() stays
+# silent and only a prompt can tell a present number from an answering one. Arithmetic did not
+# become allowed; it moved to prompts/compute_figure_v1.md and src/figures.py, where a figure has a
+# checked derivation behind it. Versioned as new files rather than edited in place (VOX-018): v1 and
+# v2 are what the numbers in ARCHITECTURE.md were measured against, and a prompt you can no longer
+# read is a measurement you can no longer reproduce.
+PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v3.md"
 
 # The one refusal, shared by the two paths that can produce it: this module when no chunk clears the
 # floor, and the model when the chunks that did clear it do not contain the answer. Written out
@@ -205,7 +210,16 @@ _UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six"
           "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
           "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
           "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
-_SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
+# "hundred" is a MULTIPLIER inside a group; the rest are scales that close one.
+#
+# Getting that wrong was a real bug, found by VOX-034's figure gate: with "hundred" treated as a
+# closing scale, "six hundred thousand" parsed as (6*100) + (1*1000) = 1600 rather than 600000, and
+# "three hundred and sixty five thousand" as 65300 rather than 365000. Both are how a person says a
+# salary out loud, so the guard was checking spoken currency figures against numbers nobody said —
+# in both directions: a correctly grounded reply could be refused, and an invented figure could pass
+# if the mis-parse happened to land on something in the excerpts.
+_MULTIPLIER = {"hundred": 100}
+_SCALES = {"thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
            "million": 1_000_000, "crore": 10_000_000, "crores": 10_000_000}
 _NUMBER_WORD = re.compile(r"[a-z]+")
 
@@ -248,6 +262,12 @@ def numbers_in(text, parts=False):
             running = True
             if parts:
                 found.add(float(_UNITS[w]))
+        elif w in _MULTIPLIER and running:
+            # Scales the group in progress and does NOT close it, so "six hundred thousand" is
+            # (6 * 100) * 1000 and not 600 + 1000. See the comment on _MULTIPLIER.
+            current = max(current, 1.0) * _MULTIPLIER[w]
+            if parts:
+                found.add(current)
         elif w in _SCALES and running:
             current = max(current, 1.0) * _SCALES[w]
             total += current
@@ -295,6 +315,64 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
         # to be grounded in and no question of what the model might say instead.
         return Answer(REFUSAL, [], [], grounded=False)
 
+    # VOX-034 part B. A question that states a number may be asking for one back, and the prose
+    # prompt is forbidden from doing arithmetic — so it goes to the figure path instead, where the
+    # model names the operands and Python does the sum. See src/figures.py.
+    #
+    # Routed on `states_a_number` and not on a classifier, for the reason turn_reply's docstring
+    # gives about the retrieval floor being the router: a cheap syntactic test that can be read off
+    # the transcript beats a second unmeasured decision. It is also why every query in
+    # evals/dev/pdf_queries.json is unaffected — none of them states a number, so `make gate-poc`
+    # never enters this branch.
+    #
+    # This does NOT add a call to the turn: the figure path replaces the prose call rather than
+    # preceding it, so a numeric question still costs one LLM call. That is the same constraint
+    # turn_reply keeps for the two-path routing above it.
+    if figures.states_a_number(transcript):
+        fig = figures.compute(transcript, hits, turn_id, model_id=model_id,
+                              fallback=fallback, on_fallback=on_fallback)
+        # `None` is an unparseable extraction and `not fig.rule` is an extraction with nothing in it.
+        # Both fall through to the prose prompt below rather than refusing, because v2 already
+        # answers this question correctly — it just will not compute. Costs a second call on a
+        # failure path, which is the right place to spend one.
+        if fig is not None and fig.rule:
+            spoken = fig.spoken()
+            if is_refusal(spoken):
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            # THE GUARD STILL APPLIES, and this is the point of the whole design. The figure path
+            # composes its sentence around a value Python computed, but `rule` is model-authored
+            # prose and can carry a figure of its own — "you will get sixteen days" — which is the
+            # v1 failure with extra steps. So the reply is checked exactly as the prose path is
+            # checked, with the derivation's own numbers added to what counts as grounded: the
+            # computed value, and every operand that traced.
+            #
+            # That is the numeric guard NARROWED, not relaxed. A number the person supplied is still
+            # not grounded by having been asked — it is grounded only as an operand inside a
+            # derivation that checked out, which is why `allowed` is empty when nothing was computed.
+            allowed = set()
+            if fig.computed:
+                allowed.add(float(fig.value))
+                for op in fig.operands:
+                    try:
+                        allowed.add(float(op.get("value")))
+                    except (TypeError, ValueError):
+                        continue
+            invented = [v for v in ungrounded_numbers(spoken, hits)
+                        if not any(abs(v - a) < 1e-6 for a in allowed)]
+            if invented:
+                print(f"UNGROUNDED NUMBER on the figure path — {arms_repr(invented)} appears in no "
+                      f"excerpt and in no checked derivation; refusing instead of speaking it.\n"
+                      f"  suppressed reply: {' '.join(spoken.split())}", file=sys.stderr)
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            if not fig.computed:
+                # The rule, stated, with no figure — what v2 already asked for and what
+                # evals/dev/figure_queries.json scores as `state_rule`. Grounded: a rule read out of
+                # an excerpt is an answer, and `missing` says why no number came with it.
+                print(f"figure not computed — {', '.join(fig.missing)}", file=sys.stderr)
+            return Answer(spoken, cited(hits), hits, grounded=True)
+
     from src import arms                      # imported here: arms imports nlu, which this imports
     text = arms.llm(
         messages(transcript, hits), model_id, turn_id=turn_id,
@@ -324,6 +402,92 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
 def arms_repr(values):
     """-> "12, 4" — the invented figures, as a person would read them in a log line."""
     return ", ".join(f"{v:g}" for v in values)
+
+
+# --- retrieval, with one rewritten retry (VOX-034) ---------------------------------------------
+
+
+def retrieve_with_history(transcript, turn_id, idx, history=None, k=None, floor=None):
+    """-> (hits, question_to_ask, rewrite) — retrieval for one turn, retried once on a miss.
+
+    The single copy of VOX-034's retrieval decision. `turn_reply()` calls it and so does
+    `tests/gates/gate_followup.py`, for the reason `turn_reply`'s own docstring gives about a second
+    copy of the routing: a gate that scores a slightly different pipeline from the one the loop runs
+    is measuring something nobody ships.
+
+    The retry fires **only on a miss**, and that is the whole safety argument. A turn that already
+    retrieved something is never rewritten, so this cannot change the answer to a question that
+    already worked — which is what lets `make gate-poc` stand as a no-regression check instead of a
+    number to re-measure. See `src/history.py` on why the rewritten query is built from previous
+    QUESTIONS and never from previous ANSWERS.
+
+    `question_to_ask` is the rewritten string when the retry succeeded, and `transcript` otherwise.
+    It is what the grounded prompt should ask, because handing a model five paternity excerpts and
+    the words "how far in advance do I have to plan it" is asking it to guess what "it" was. This
+    keeps `messages()` single-shot and adds no previous *answer*, so it introduces no figure the
+    numeric guard cannot see: the only numbers it can add are ones the person said themselves,
+    which the guard already treats as ungrounded.
+
+    `rewrite` is None when no retry was attempted, or `{"query", "used", "trigger"}` when one was —
+    `used` False meaning the retry also missed. Both facts are worth recording: a rewrite that fires
+    and fails is a different diagnosis from one that never fired.
+
+    **Two triggers, and the first one was added after the first gate run disproved the design.**
+    VOX-034 shipped with a miss-only trigger, on the argument that it was self-limiting and
+    therefore safe. It is safe and it was measured to be nearly useless: `make gate-followup` at
+    attempt 1 scored referential 2/6 -> 3/6, and three of the four failures never triggered a
+    rewrite at all because they did not MISS — they confidently retrieved the wrong document.
+    "how far in advance do I have to plan it" returned travel-policy (advance booking); "what about
+    during a performance improvement plan" returned performance-management at 0.742, when the answer
+    is one clause of leave-policy:p5. A fragment does not fail by finding nothing; it fails by
+    finding whatever its few surviving terms happen to match.
+
+    So an *elliptical* follow-up (see `history.elliptical`) has its query rewritten BEFORE retrieval
+    and the fragment is not used at all — the fragment is not what the person asked, it is half of
+    it. A non-elliptical transcript is untouched, which is what keeps `make gate-poc` a
+    no-regression check: every query in that set is a whole question.
+
+    The miss trigger is kept as a second chance for the referential turns ellipsis detection does
+    not catch — "what happens to the extra ones" has an anaphor and is caught, but the general case
+    of a fragment with neither an opener nor a pronoun still exists.
+    """
+    # Trigger 1: the transcript reads as a continuation, so retrieve on BOTH forms and fuse.
+    #
+    # Fused and not replaced, and that is measured rather than preferred. Attempt 2 replaced the
+    # fragment with the concatenation and scored referential 3/6 — but a DIFFERENT 3: f01/f02/f04
+    # were rescued and f05/f06 were lost, because the antecedent's terms swamp the follow-up's.
+    # "and if I am still on probation" finds probation-period:p6 on its one high-IDF term; prepend
+    # "what is the notice period when I resign" and separation-policy's many matching terms bury it.
+    # Both queries carry real signal, so neither gets to win outright — which is the same argument
+    # Index.search already makes about its lexical and dense halves, and the reason retrieval.fuse
+    # exists to be shared rather than reimplemented here.
+    if history and history.elliptical(transcript):
+        rq = history.retrieval_query(transcript)
+        if rq and rq != transcript:
+            raw = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
+            rw = retrieval.retrieve(rq, k=k, floor=floor, idx=idx, turn_id=turn_id)
+            hits = retrieval.fuse([raw, rw], k=k or RETRIEVAL_TOP_K)
+            rewrite = {"query": rq, "used": bool(rw), "trigger": "elliptical"}
+            # The question the model is asked is the resolved one only when the rewrite actually
+            # contributed something the fragment did not find on its own. Otherwise the fragment
+            # already retrieved its own answer and the antecedent is noise in the prompt.
+            asked = rq if rw and not raw else transcript
+            return hits, asked, rewrite
+
+    hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
+    if hits or not history:
+        return hits, transcript, None
+
+    # Trigger 2: it missed, and there is an antecedent that might rescue it.
+    rq = history.retrieval_query(transcript)
+    if not rq or rq == transcript:
+        return hits, transcript, None
+
+    retry = retrieval.retrieve(rq, k=k, floor=floor, idx=idx, turn_id=turn_id)
+    rewrite = {"query": rq, "used": bool(retry), "trigger": "miss"}
+    if retry:
+        return retry, rq, rewrite
+    return hits, transcript, rewrite
 
 
 # --- inside a turn (VOX-032) -------------------------------------------------------------------
@@ -360,7 +524,7 @@ def knowledge_base(echo=print):
 
 
 def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallback=None,
-               fallback=True, k=None, floor=None, plain=None):
+               fallback=True, k=None, floor=None, plain=None, history=None):
     """One turn's reply: grounded in the documents when they cover the question, plain when not.
 
     -> Reply(text, answer, hits). The whole of VOX-032's routing decision, in one place because
@@ -384,6 +548,14 @@ def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallb
     Left as None (a caller with no turn record, i.e. a test) nothing is timed and the routing is
     unchanged.
 
+    `history` is a `src.history.History` for this session, or None for a caller with no session
+    (every test written before VOX-034, and `scripts/compare_arms.py`, which must keep timing the
+    pre-history pipeline). It does two things and no third: on a retrieval **miss** it supplies the
+    antecedent for one rewritten retry, and on the plain path it is passed through as prior
+    messages. It never reaches the grounded prompt — `answer.messages()` is single-shot and stays
+    so, because the numeric guard only ever sees `hits` and a previous answer in the prompt would be
+    a figure it cannot check. `history=None` is byte-for-byte the pre-VOX-034 path.
+
     `plain` replaces what the un-retrieved path calls, with the same signature as `nlu.reply` and
     the same job: transcript in, spoken text out. It exists because VOX-019 gave the live loop a
     second thing to want from that call — the structured TurnState that VOX-020's confirmation gate
@@ -391,17 +563,18 @@ def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallb
     inside `src/loop.py`. The routing itself is not negotiable by a caller: what retrieval vouched
     for still goes to the grounded prompt, whatever `plain` is.
     """
-    hits = []
+    hits, asked, rewrite = [], transcript, None
     if idx is not None:
         with _timing(turn, "retrieval"):
-            # turn_id goes down into retrieval because the dense half makes a model call now: the
-            # query encoding is a line in runs/calls.jsonl, and a line with a null turn_id joins to
-            # nothing, which is the one thing the two-log design exists to prevent.
-            hits = retrieval.retrieve(transcript, k=k, floor=floor, idx=idx, turn_id=turn_id)
+            hits, asked, rewrite = retrieve_with_history(
+                transcript, turn_id, idx=idx, history=history, k=k, floor=floor)
+        if turn is not None and rewrite is not None:
+            turn.extra["query_rewritten"] = rewrite["used"]
+            turn.extra["rewritten_query"] = rewrite["query"]
 
     with _timing(turn, "llm"):
         if hits:
-            got = answer(transcript, turn_id, hits=hits, model_id=model_id,
+            got = answer(asked, turn_id, hits=hits, model_id=model_id,
                          on_fallback=on_fallback, fallback=fallback)
             text = got.text
         else:
@@ -409,7 +582,8 @@ def turn_reply(transcript, turn_id, idx=None, turn=None, model_id=None, on_fallb
             # to be grounded in, so the turn behaves as it did before this ticket existed.
             got = None
             text = (plain or nlu.reply)(transcript, turn_id, model_id=model_id,
-                                        on_fallback=on_fallback, fallback=fallback)
+                                        on_fallback=on_fallback, fallback=fallback,
+                                        history=history)
 
     if turn is not None:
         turn.grounding(hits, grounded=bool(got and got.grounded),

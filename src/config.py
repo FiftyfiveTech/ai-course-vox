@@ -487,6 +487,45 @@ FUSION_CANDIDATES = int(os.environ.get("VOX_FUSION_CANDIDATES", "20"))
 # the fallback when the encoder cannot load (no weights on this machine, no network on first run).
 HYBRID_RETRIEVAL = os.environ.get("VOX_HYBRID_RETRIEVAL", "1") not in ("0", "false", "False", "")
 
+# --- conversation history (VOX-034) ------------------------------------------------------------
+# How many previous turns a session keeps. Three, because the thing history is for here is
+# resolving a reference — "it", "those", "and privilege leaves" — and a reference reaches back one
+# or two turns in speech, not ten. A longer window costs nothing in latency (the retry is arithmetic
+# over a 331 KB vector file) but it does widen what a rewritten query can drag in, and a query
+# rewritten from a topic three turns dead is worse than no rewrite at all.
+HISTORY_TURNS = int(os.environ.get("VOX_HISTORY_TURNS", "3"))
+
+# Whether history is used at all. Off is exactly pre-VOX-034 behaviour, kept reachable for the same
+# reason HYBRID_RETRIEVAL is: it is the baseline column the follow-up gate measures against, and an
+# A/B whose "before" arm has to be recovered from git history is not an A/B anyone re-runs.
+HISTORY_ENABLED = os.environ.get("VOX_HISTORY", "1") not in ("0", "false", "False", "")
+
+# --- the one inferred constant (VOX-034, decision reversed 2026-08-24) --------------------------
+# The encashment formula in leave-policy:p7 divides by "number of days within a year" and the corpus
+# never says what that number is. VOX-034 first decided to refuse rather than assume, so every
+# encashment question stated the rule and computed nothing unless the person volunteered the figure.
+# That decision was reversed: assume 365.
+#
+# What the reversal costs, recorded here because the code cannot warn about it at run time. 365 is
+# not in the documents, so a figure computed with it carries an assumption the person is never told
+# about — and the assumption is wrong one year in four. A leap year makes the same balance worth
+# slightly more than this arithmetic says. The number is env-configurable so a leap-year run is a
+# flag rather than an edit, but nothing detects the year for you.
+#
+# It is ONE named constant and not a general licence to infer, which is the whole boundary: an
+# operand only ever traces to a constant when its name says it is counting days in a year (see
+# figures.allowed_constant). Anything else the model supplies from general knowledge still fails to
+# trace, so "which constants" cannot quietly become "any constant".
+DAYS_IN_YEAR = float(os.environ.get("VOX_DAYS_IN_YEAR", "365"))
+
+# How much of a quoted formula's distinctive vocabulary must appear in the excerpts before the
+# arithmetic is trusted (figures.formula_grounded). Operand tracing checks where each NUMBER came
+# from and says nothing about whether the SUM is the one the documents state — the gap that let a
+# live turn invent "(eligible_balance - 24) * basic_salary", compute 80000 and say it aloud with
+# every operand traced. High on purpose: a formula is a short, specific string, so an honest quote
+# scores near 1.0, and the cost of being wrong is a confident wrong number about someone's pay.
+FORMULA_OVERLAP = float(os.environ.get("VOX_FORMULA_OVERLAP", "0.7"))
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "

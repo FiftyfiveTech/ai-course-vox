@@ -343,3 +343,141 @@ Lessons:    (1) A rehearsal measures the *run*, and the run includes the console
             someone will trust under pressure. The cheapest guard is mechanical: compare the names
             assigned in `.env` against the names appearing in the code, and print the difference
             before the first turn.
+
+## VOX-034 - Cross-questions, computed figures, trick questions (2026-08-24, Vimal as Builder)
+
+Executed:   Three dev sets committed BEFORE any implementation, in their own commit (912a82b), then
+            three mechanisms and three gates.
+            `evals/dev/followup_queries.json` (10) - referential follow-ups plus self-sufficient and
+            absent-follow-up controls, scored correct-source@3 on the follow-up turn, history off vs
+            on. `src/history.py` is new: a bounded per-session window, an ellipsis test (opener or
+            anaphor), and a query rewrite built from previous QUESTIONS and never previous ANSWERS.
+            `retrieval.fuse()` combines the fragment's ranking with the resolved question's by
+            reciprocal rank.
+            `evals/dev/figure_queries.json` (10) - `src/figures.py` and
+            `prompts/compute_figure_v1.md`. The model names the operands as JSON, Python evaluates
+            them behind an AST whitelist. No arithmetic is done by a model and no constant is ever
+            inferred.
+            `evals/dev/trick_queries.json` (12) - `prompts/answer_from_source_v3.md` adds
+            premise-correction, the anti-sycophancy clause and the worked-example rule.
+            `--no-history` restores the pre-ticket loop, the way `--no-kb` restores pre-VOX-032.
+
+Deviations: (1) Scope grew mid-ticket. 1887 was written as follow-ups; the requester added figure
+            calculation and trick questions to the same ticket. Kept as one ticket with three
+            separate gate numbers rather than split, because averaging them would hide a regression
+            in one behind a gain in another. The card's title still says only cross-questions.
+            (2) Built both sides again, as VOX-033 did. Blind labelling does not exist when one agent
+            writes the implementation and the eval, so the substitute is commit ordering: cases
+            first, in their own commit, with the limit printed in each gate's output and stated in
+            each file's `_note`.
+            (3) g09 was left UNDECIDED in the committed eval, decided by the requester as "refuse",
+            and then REVERSED by the requester to "assume 365". Both decisions are recorded in
+            figure_queries.json in order, because a threshold whose history is invisible cannot be
+            told apart from one moved to make a gate pass. The reversal is implemented as ONE named
+            constant in config.DAYS_IN_YEAR, gated by figures.allowed_constant() which matches on the
+            operand's NAME — so 365 traces as a days-in-year and nowhere else, and no other constant
+            a model might supply gets in. What it costs is written down rather than hidden: the figure
+            carries an assumption the listener is never told about, and it is wrong one year in four.
+            g03 and g09 are kept as a pair to keep the boundary testable — g03's days-in-year comes
+            from the person, g09's is assumed, so removing the allowlist makes g09 refuse again while
+            g03 still computes. Both are stable across repeats; see Numbers.
+            (4) TWO GATE CRITERIA WERE CORRECTED after a failing run, with the reasons written into
+            the gate docstrings because a moved goalpost and a fixed one look identical otherwise.
+            `self_sufficient` was asserting non-interference AND retrieval coverage; f07 fails the
+            second for a pre-existing reason ("resign" is not in the corpus vocabulary - the
+            documents say "resignation"), so it now asserts only what this ticket owns.
+            `absent_followup` was asserting that retrieval return nothing, which it cannot: the
+            rewrite admits chunks via the DENSE half at lexical 0.098, and src/answer.py already
+            names the layer that owns the case. Now scored on the answer refusing.
+            (5) Part C DID NOT PASS. Escalated rather than tuned a fourth time - see Numbers.
+
+Numbers:    `uv run python tests/gates/gate_followup.py` (2026-08-24), retrieval-only for the first
+            two groups:
+                referential          2/6 0.333 -> 4/6 0.667   PASS (need on > off and on >= 0.667)
+                self_sufficient      1/2 0.500 -> 1/2 0.500   PASS (non-interference)
+                absent_followup      2/2 1.000 -> 2/2 1.000   PASS (answer refuses both columns)
+            `uv run python tests/gates/gate_figures.py`, meta-llama/Llama-3.1-8B-Instruct on
+            nvidia-nim, `cost_usd 0.000000`:
+                accuracy   4/4 = 1.000   floor 1.000   (computable)   ** NOT REPRODUCIBLE **
+                refusal    4/4 = 1.000   floor 1.000   (missing_operand)
+                no_arithmetic 1/1, trap 1/1
+            CORRECTED, same day. That 4/4 was ONE RUN and does not reproduce. Three consecutive
+            no-edit runs afterwards scored 2/5, 3/5 and 3/5 (five computable cases by then, g09
+            having moved — see below), with individual cases flipping between runs. The gate now
+            takes `--repeat` (default 2) and a case passes only if every repeat passes, because
+            CLAUDE.md's own standard is that a gate which cannot reproduce its own number is not a
+            gate. At `--repeat 3`, 60 model calls, `cost_usd 0.000000`:
+                accuracy   2/5 = 0.400   floor 1.000   **FAILED**
+                refusal    3/3 = 1.000   floor 1.000
+                no_arithmetic 1/1, trap 1/1
+                g03  [10000.0, 10000.0, 10000.0]      stable
+                g09  [16438.36, 16438.36, 16438.36]   stable
+                g01  [None, None, 3.0]                UNSTABLE
+                g02  [None, 6.0, None]                UNSTABLE
+                g04  [None, None, None]               fails outright
+            The split is not random. Encashment is stable because leave-policy:p7 writes the formula
+            out verbatim, so extraction is a copy. Accrual is unstable because the corpus states no
+            accrual formula at all — leave-policy:p10 gives a worked example ("Ram joined 1st January
+            and avails 5 leaves ... 1*9 = 9") and the extractor has to invent the formula's shape
+            every run, which it does differently. So the figure path is reliable exactly where the
+            document states a formula and unreliable where the rule is only implied by an example.
+            That boundary is the real result of part B.
+            `uv run python tests/gates/gate_trick.py`, 27 model calls, `cost_usd 0.000000`:
+                false_premise 1/2, leading 1/2, contradiction_across_turns 0/2
+                traps        2/6 = 0.333   floor 0.600   **FAILED**
+                out_of_scope 3/3 = 1.000
+                control      3/3 = 1.000   floor 1.000
+            No regression, `uv run python tests/gates/gate_poc_pdf.py`: correct-source@3 7/8 = 0.875
+            (floor 0.875), refusal 2/2 = 1.000, grounded-answer 8/8 - identical to before the branch,
+            re-run after switching the answer prompt to v3.
+            `uv run pytest tests/ -q` -> **421 passed** (392 after part A, 363 before the branch).
+
+Lessons:    (1) A gate rejected the design twice before it passed, and both rejections were about
+            the mechanism rather than a threshold. The first rewrite fired only on a retrieval MISS,
+            which is provably safe and was nearly useless: three of four failures never triggered it
+            because they did not miss. A fragment does not fail by finding nothing - "what about
+            during a performance improvement plan" returned performance-management at **0.742** when
+            the answer is one clause of leave-policy:p5. The second attempt replaced the fragment
+            with the concatenation and scored the same 3/6 with a *different* three, because the
+            antecedent's terms swamp the follow-up's. Only fusing both rankings worked. A single
+            number moving 2/6 -> 3/6 would have looked like progress twice.
+            (2) VOX-031's retro left this open: "the guard checks presence, not meaning ... Still
+            open." It is now measured and it is worse than it looked. `30` appears in SEVEN chunks,
+            one of them the advance-notice clause sitting beside the five-day paternity entitlement,
+            so "your 30 days of paternity leave" has every number traced and `ungrounded_numbers()`
+            stays silent. `24` is the privilege-leave cap, so the contradiction traps pass too. A
+            number can be perfectly grounded and still be the answer to a different question. This
+            closes that open item as *confirmed*, not fixed.
+            (3) Writing the eval found a bug in shipped code that no test had. `numbers_in()` treated
+            "hundred" as a scale that closes a group, so "six hundred thousand" parsed as
+            (6*100)+(1*1000) = **1600** and "three hundred and sixty five thousand" as 65300. The
+            guard was checking spoken currency figures against numbers nobody said - in both
+            directions. Fixed in the shared function with tests; it was reachable only by writing a
+            case whose operand a person would speak aloud.
+            (4) Tracing an operand by value-membership is not tracing. The extractor returned
+            `months_accrued = 5, source "person"` for a question that never said five - it traced
+            because 5 is in the excerpts as the leaves Ram takes in the worked example - and computed
+            12*5-3 = **57** with every operand "verified". The fix is to check the model's own claim
+            about where each number came from, which is cheap and was measurably necessary.
+            (5) Prompt strengthening has a ceiling and hits it visibly. Attempt 3 on the trick traps
+            produced byte-identical replies to attempt 2 - the additions were ignored - and one of
+            them regressed `absent_followup` from 2/2 to 1/2 by making the model keener to answer.
+            An addition with no measured benefit and a measured cost was removed rather than kept for
+            being well-argued. t01 and t06 are the same root cause: the 8B arm is led by the
+            question's framing, and it cannot be instructed out of it. That wants the mechanism the
+            figure path got - find what the question's number is attached to in the excerpts and
+            compare - which is a ticket, not an attempt.
+
+            (6) The worst number in this ticket is one I reported before checking it twice. The
+            figure gate's first accuracy was 4/4 and I put it in a commit message, on the board and
+            in this file before running it again. It was a single draw from an unstable extractor and
+            three consecutive re-runs scored 2/5, 3/5, 3/5. VOX-026's retro already recorded the
+            discipline that catches this — "two consecutive runs with no edit between them is the
+            whole discipline" — and it was there to be read. The gate now enforces agreement across
+            repeats so the next person cannot make the same mistake by being in a hurry.
+            (7) Tracing every operand does not make the arithmetic right. g02 once returned the
+            formula `1 - 2` — monthly entitlement minus leaves taken, with the month multiplier
+            dropped — and computed -1 leave remaining. Both operands traced, the guard was silent,
+            and the sentence read plausibly. The derivation check validates where the NUMBERS came
+            from and says nothing about whether the FORMULA is the right one, which is the next thing
+            a figure path would need and is not what this one bought.

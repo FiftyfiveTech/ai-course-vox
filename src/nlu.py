@@ -74,21 +74,29 @@ def system_prompt():
     return load_prompt()
 
 
-def messages(transcript, stage=None):
+def messages(transcript, stage=None, history=None):
     """-> the `msgs` list for arms.llm(). The only place a turn's prompt shape is decided.
+
+    `history` (VOX-034) is a `src.history.History` or None, and prior turns are inserted between the
+    system message and this transcript. This is the PLAIN path only: the grounded path builds its own
+    messages in `src/answer.py` and stays single-shot, because the numeric guard is a set difference
+    against the excerpts retrieved for the current question and a previous answer in the prompt would
+    be a figure it cannot see. `history=None` reproduces the pre-VOX-034 message list exactly.
 
     Args:
         transcript: the user's spoken text.
         stage: prompt stage to use (greet, clarify, confirm, capture, escalate, refuse).
                None falls back to the generic reply prompt.
+        history: prior turns for conversational coherence, or None.
     """
-    return [
-        {"role": "system", "content": load_prompt(stage)},
-        {"role": "user", "content": transcript},
-    ]
+    msgs = [{"role": "system", "content": load_prompt(stage)}]
+    if history:
+        msgs.extend(history.messages_prefix())
+    msgs.append({"role": "user", "content": transcript})
+    return msgs
 
 
-def openai_chat(arm, msgs, rec, timeout=None, temperature=None):
+def openai_chat(arm, msgs, rec, timeout=None, temperature=None, json_mode=False, max_tokens=None):
     """OpenAI-compatible /chat/completions. Serves every LLM arm — NIM, Groq and ollama all speak it.
 
     `arm.extra["request"]` adds the fields an arm cannot be called without — `reasoning_effort` for
@@ -103,7 +111,12 @@ def openai_chat(arm, msgs, rec, timeout=None, temperature=None):
     """
     body = {"model": arm.provider_model, "messages": msgs,
             "temperature": TEMPERATURE if temperature is None else temperature,
-            "max_tokens": MAX_TOKENS}
+            "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens}
+    # VOX-034: `json_mode` for the figure extractor, which needs a parseable object rather than a
+    # sentence. Same mechanism state.build() already uses; here it is a per-call option because the
+    # same arm serves both the spoken reply and the extraction, and neither is a property of the arm.
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     for k, v in (arm.extra.get("request") or {}).items():
         body.setdefault(k, v)
 
@@ -185,7 +198,8 @@ BACKENDS = {"openai-chat": openai_chat, "ollama-chat": openai_chat}
 LOADERS = {"ollama-chat": load_ollama}
 
 
-def reply(transcript, turn_id, model_id=None, stage=None, on_fallback=None, fallback=True):
+def reply(transcript, turn_id, model_id=None, stage=None, on_fallback=None, fallback=True,
+          history=None):
     """-> one short reply suitable for reading aloud, from the named arm or the default.
 
     Args:
@@ -196,10 +210,13 @@ def reply(transcript, turn_id, model_id=None, stage=None, on_fallback=None, fall
                None uses the generic reply prompt.
         on_fallback: optional callback when the remote arm falls back to local.
         fallback: set False to disable fallback (e.g. arm comparison scripts).
+        history: prior turns (VOX-034), or None for the pre-VOX-034 single-shot prompt.
     """
     from src import arms                      # imported here: arms imports this module for BACKENDS
     prompt_key = stage if stage in PROMPT_FILES else _DEFAULT_STAGE
-    return arms.llm(messages(transcript, stage), model_id, turn_id=turn_id,
+    msgs = messages(transcript, stage, history=history)
+    return arms.llm(msgs, model_id, turn_id=turn_id,
                     on_fallback=on_fallback, fallback=fallback,
                     prompt_file=PROMPT_FILES[prompt_key].name,
-                    transcript_chars=len(transcript))
+                    transcript_chars=len(transcript),
+                    history_turns=len(history) if history else 0)

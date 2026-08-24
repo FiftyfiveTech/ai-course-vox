@@ -67,7 +67,10 @@ def run_main(monkeypatch, argv, clock, turn=None):
     body = turn or default_turn
     calls = {"i": 0}
 
-    def one_turn(chosen, pending=None, watch=False, idx=None):
+    def one_turn(chosen, pending=None, watch=False, idx=None, **kw):
+        # **kw so this double does not have to be edited every time one_turn grows an argument it
+        # does not care about. These tests are about what BOUNDS a session — the turn count, the
+        # clock, the quiet streak — and `history` (VOX-034) is not one of those.
         watches.append(watch)
         result = body(calls["i"], clock)
         calls["i"] += 1
