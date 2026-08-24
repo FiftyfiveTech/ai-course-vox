@@ -49,7 +49,7 @@ from collections import namedtuple
 import httpx
 
 from src import errors
-from src.config import DAYS_IN_YEAR, PROMPTS_DIR
+from src.config import DAYS_IN_YEAR, FORMULA_OVERLAP, PROMPTS_DIR
 from src.telemetry import log_call
 
 PROMPT_FILE = PROMPTS_DIR / "compute_figure_v2.md"
@@ -193,25 +193,125 @@ def safe_eval(expression, names):
 # values, so without this the encashment questions refuse; see config.DAYS_IN_YEAR for the decision
 # and what it costs. A second entry here should be argued for on a ticket, not added in passing —
 # every constant added is a number a listener is told without being told it was assumed.
+# Names spelled out rather than matched by a predicate. The first version tested `"day" in n and
+# "year" in n`, which is the kind of rule that looks careful and is not: `working_days_in_year` matches
+# it and would have been handed 365, when working days in a year is about 250. A wrong denominator in
+# a currency figure is precisely the failure this whole module exists to prevent, so the accepted
+# spellings are enumerated and anything else gets nothing.
+_DAYS_IN_YEAR_NAMES = frozenset((
+    "days in year", "days in a year", "days within year", "days within a year",
+    "number of days in year", "number of days in a year",
+    "number of days within year", "number of days within a year",
+    "calendar days in year", "calendar days in a year",
+    "total days in year", "total days in a year", "days per year", "days in the year",
+))
+
 _CONSTANTS = (
-    (lambda n: "day" in n and "year" in n, lambda: DAYS_IN_YEAR),
+    (lambda n: n in _DAYS_IN_YEAR_NAMES, lambda: DAYS_IN_YEAR),
 )
 
 
-def allowed_constant(name, value):
-    """-> True if `value` is the constant this repo is willing to infer for an operand called `name`.
+# Phrases a rule uses when it is stating a calculation rather than a limit. Used only to catch a
+# rule sentence that describes arithmetic the excerpts do not contain — see the comment in compute().
+# Deliberately about OPERATIONS ("divided by", "multiplied by") and not about quantities: "up to
+# 1500", "capped at 24 days" and "two days per week" are limits, and a limit read off an excerpt is a
+# perfectly good answer.
+_ARITHMETIC_PHRASES = (
+    "divided by", "multiplied by", "times your", "times the", "minus the", "minus your",
+    "plus the", "plus your", "subtracted from", "divided into", "pro-rated by", "prorated by",
+)
 
-    Matched on the operand's NAME, not on the number, so 365 traces as a days-in-year and nowhere
-    else. An extractor that labels a salary 365 gets no help from this.
+
+def describes_arithmetic(text):
+    """-> True if `text` reads as a formula rather than a rule or a limit."""
+    low = " ".join((text or "").split()).lower()
+    return any(p in low for p in _ARITHMETIC_PHRASES)
+
+
+def formula_grounded(formula, hits, threshold=None):
+    """-> True if the model's quoted `formula` is really in the excerpts. The check one level up.
+
+    Operand tracing verifies where each NUMBER came from and says nothing about whether the SUM is
+    the one the documents state. That gap produced the worst answer this module has given. Asked
+    "eligible leave balance is 32 and my basic salary is 10,000, how much will I get" on a turn where
+    retrieval returned the accrual tables instead of leave-policy:p7, it invented
+    "(eligible_balance - 24) * basic_salary", computed 80000 and said it out loud. Every operand
+    traced — 32 and 10000 from the person, 24 from an excerpt — so nothing objected. The real formula
+    gives 876.71.
+
+    So the quote is verified like any other provenance claim: the distinctive words of the formula
+    have to appear in the text the model was given. Token overlap rather than substring, because the
+    model reformats what it quotes (whitespace, "/" for "divided by", dropped articles) and a
+    substring test would reject every honest quote. Stopwords are dropped for the same reason they
+    are dropped in retrieval — "the" matching proves nothing.
+
+    A high bar on purpose. A formula is a short, highly specific string, so an honest quote scores
+    close to 1.0 and an invention scores well under it; the cost of being wrong here is a confident
+    wrong number about someone's pay.
+    """
+    from src.retrieval import tokenize          # the same stopword list retrieval scores with
+
+    threshold = FORMULA_OVERLAP if threshold is None else threshold
+    terms = set(tokenize(formula))
+    if not terms:
+        return False
+    corpus = set()
+    for h in hits or ():
+        corpus |= set(tokenize(h.text))
+    return (len(terms & corpus) / len(terms)) >= threshold
+
+
+def constant_for(name):
+    """-> the constant this repo supplies for an operand called `name`, or None.
+
+    THE ASSUMPTION IS OURS TO MAKE, not the model's to guess, and getting that backwards was a real
+    bug. The first version only accepted a days-in-year if the model itself put 365 there; a careful
+    extractor instead reports `{"value": null, "source": "missing"}` — which is what v1's prompt
+    trained it to do — and the figure was then discarded for want of a number the config already
+    held. A live turn asking "eligible leave balance is 32 and my basic salary is 10,000, how much
+    will I get" refused with `days_in_year` missing for exactly that reason.
     """
     n = re.sub(r"[^a-z]+", " ", (name or "").lower())
     for matches, const in _CONSTANTS:
         if matches(n):
-            try:
-                return abs(float(value) - const()) < 1e-6
-            except (TypeError, ValueError):
-                return False
-    return False
+            return const()
+    return None
+
+
+def allowed_constant(name, value):
+    """-> True if `value` is the constant this repo supplies for an operand called `name`.
+
+    Matched on the operand's NAME, not on the number, so 365 traces as a days-in-year and nowhere
+    else. An extractor that labels a salary 365 gets no help from this.
+    """
+    const = constant_for(name)
+    if const is None:
+        return False
+    try:
+        return abs(float(value) - const) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
+def bind_constants(operands, expression):
+    """-> {name: value} for every allowlisted constant this derivation needs. Supplied, not asked for.
+
+    Covers both shapes the extractor produces: an operand it named but could not value, and a bare
+    name it used in the expression without listing as an operand at all. Either way the number comes
+    from `config.DAYS_IN_YEAR` and never from the model, so the model cannot fail to guess it and
+    cannot guess it wrong.
+    """
+    bound = {}
+    for op in operands or ():
+        name = op.get("name")
+        const = constant_for(name)
+        if const is not None:
+            bound[name] = const
+    for token in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression or "")):
+        const = constant_for(token)
+        if const is not None:
+            bound.setdefault(token, const)
+    return bound
 
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -278,6 +378,9 @@ def untraced(operands, hits, transcript):
     missing = []
     for op in operands or ():
         name = op.get("name") or "?"
+        # Ours to supply, so it is never missing however the model valued it (or failed to).
+        if constant_for(name) is not None:
+            continue
         try:
             v = float(op.get("value"))
         except (TypeError, ValueError):
@@ -384,20 +487,42 @@ def compute(transcript, hits, turn_id, model_id=None, fallback=True, on_fallback
     if not expression or not operands:
         # No formula in the excerpts, or nothing to put in it. g08's courier cap lands here: a cap is
         # a rule to state, not arithmetic to do.
+        #
+        # But a rule sentence that DESCRIBES arithmetic when no formula was found is a formula the
+        # model supplied itself, and it is spoken aloud as though the documents said it. Observed on
+        # a live turn where retrieval returned the accrual tables and not leave-policy:p7: asked
+        # "eligible leave balance is 32 and my basic salary is 10,000, how much will I get", it said
+        # "encashment is your eligible leave balance divided by the number of days in the year,
+        # multiplied by your basic salary" — the real formula with two operands swapped — and on the
+        # next turn "your eligible leave balance minus 24, multiplied by your basic salary", which is
+        # not a rule in any document. Fluent, cited, and invented.
+        #
+        # So: no formula found and a rule that talks like one means refuse. Stating the rule is only
+        # an answer when the rule was actually read off an excerpt.
+        if describes_arithmetic(rule):
+            return Figure(None, "", None, operands,
+                          ["the rule describes a calculation that is in no excerpt"], data)
         return Figure(None, rule, None, operands, ["no formula in the excerpts"], data)
+
+    # The quote is verified before the operands are, because a formula that is not in the excerpts
+    # makes the operands irrelevant — see formula_grounded() for the 80000 this exists to stop.
+    if not formula_grounded(data.get("formula") or rule, hits):
+        return Figure(None, "", expression, operands,
+                      ["the quoted formula is not in the excerpts"], data)
 
     missing = untraced(operands, hits, transcript)
     if missing:
         return Figure(None, rule, expression, operands, missing, data)
 
-    names = {}
+    names = bind_constants(operands, expression)
     for op in operands:
         name = op.get("name")
-        if name:
-            try:
-                names[name] = float(op.get("value"))
-            except (TypeError, ValueError):
-                return Figure(None, rule, expression, operands, [f"{name} is not a number"], data)
+        if not name or name in names:
+            continue                    # a constant we supplied; the model's value is irrelevant
+        try:
+            names[name] = float(op.get("value"))
+        except (TypeError, ValueError):
+            return Figure(None, rule, expression, operands, [f"{name} is not a number"], data)
 
     try:
         value = safe_eval(expression, names)

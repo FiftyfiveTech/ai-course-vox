@@ -120,8 +120,13 @@ def test_a_number_the_person_said_traces_however_they_said_it():
 
 
 def test_an_operand_sourced_as_missing_never_traces():
-    ops = [{"name": "days_in_year", "value": None, "source": "missing"}]
-    assert figures.untraced(ops, [FORMULA], "anything") == ["days_in_year"]
+    """`days_in_year` is deliberately excluded here — that one we supply ourselves; see
+    test_a_days_in_year_operand_is_overridden_whatever_the_model_put_there. Every other unsourced
+    operand still kills the derivation, which is the case g05/g07 score."""
+    ops = [{"name": "eligible_balance", "value": None, "source": "missing"}]
+    assert figures.untraced(ops, [FORMULA], "anything") == ["eligible_balance"]
+    ops = [{"name": "last_drawn_basic", "value": None, "source": "missing"}]
+    assert figures.untraced(ops, [FORMULA], "my balance is ten") == ["last_drawn_basic"]
 
 
 def test_days_in_year_is_the_one_constant_that_may_be_assumed():
@@ -138,21 +143,43 @@ def test_days_in_year_is_the_one_constant_that_may_be_assumed():
 
 
 @pytest.mark.parametrize("name,value", [
-    ("days_in_year", 366),          # a leap year is not the assumed constant
-    ("days_in_year", 360),          # nor a banker's year
-    ("last_drawn_basic", 365),      # the number alone earns nothing
-    ("working_days_in_year", 250),  # a different constant the model might know
+    ("last_drawn_basic", 365),        # the number alone earns nothing
+    ("working_days_in_year", 250),    # a different constant the model might know
+    ("business_days_in_year", 365),   # nor does looking almost like the allowlisted name
     ("tax_rate", 30),
+    ("months_elapsed", 6),
 ])
-def test_no_other_constant_traces(name, value):
+def test_no_other_constant_is_supplied(name, value):
     """The boundary. "Which constants" must not quietly become "any constant".
 
-    allowed_constant() matches on the operand NAME, so 365 is acceptable as a days-in-year and
-    nowhere else, and every other number a model might supply from general knowledge still has to
-    come from an excerpt or from the person.
+    `working_days_in_year` is the case that matters and the one the first implementation got wrong:
+    it tested `"day" in name and "year" in name`, which looks careful and would have handed 365 to an
+    operand counting working days — about 250. A wrong denominator inside a currency figure is
+    precisely what this module exists to prevent, so the accepted spellings are enumerated.
     """
+    assert figures.constant_for(name) is None
     ops = [{"name": name, "value": value, "source": "constant"}]
     assert figures.untraced(ops, [FORMULA], "no numbers here") == [name]
+
+
+@pytest.mark.parametrize("value", [None, 360, 366, "unknown"])
+def test_a_days_in_year_operand_is_overridden_whatever_the_model_put_there(value):
+    """We supply this number; the model's value for it is never consulted.
+
+    The bug this pins: the first version only accepted a days-in-year the MODEL valued at 365, so a
+    careful extractor reporting {"value": null, "source": "missing"} had its whole derivation thrown
+    away for want of a number config already held. A live turn refused for exactly that reason.
+    """
+    ops = [{"name": "days_in_year", "value": value, "source": "missing"}]
+    assert figures.untraced(ops, [FORMULA], "no numbers here") == []
+    assert figures.bind_constants(ops, "") == {"days_in_year": 365.0}
+
+
+def test_a_constant_is_bound_from_a_bare_name_in_the_expression():
+    """The extractor sometimes uses the name without listing it as an operand at all."""
+    got = figures.bind_constants([{"name": "basic", "value": 1}],
+                                 "(basic / number_of_days_in_year) * balance")
+    assert got == {"number_of_days_in_year": 365.0}
 
 
 def test_the_constant_is_configurable_so_a_leap_year_is_a_flag_not_an_edit(monkeypatch):

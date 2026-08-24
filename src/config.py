@@ -518,6 +518,14 @@ HISTORY_ENABLED = os.environ.get("VOX_HISTORY", "1") not in ("0", "false", "Fals
 # trace, so "which constants" cannot quietly become "any constant".
 DAYS_IN_YEAR = float(os.environ.get("VOX_DAYS_IN_YEAR", "365"))
 
+# How much of a quoted formula's distinctive vocabulary must appear in the excerpts before the
+# arithmetic is trusted (figures.formula_grounded). Operand tracing checks where each NUMBER came
+# from and says nothing about whether the SUM is the one the documents state — the gap that let a
+# live turn invent "(eligible_balance - 24) * basic_salary", compute 80000 and say it aloud with
+# every operand traced. High on purpose: a formula is a short, specific string, so an honest quote
+# scores near 1.0, and the cost of being wrong is a confident wrong number about someone's pay.
+FORMULA_OVERLAP = float(os.environ.get("VOX_FORMULA_OVERLAP", "0.7"))
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "
