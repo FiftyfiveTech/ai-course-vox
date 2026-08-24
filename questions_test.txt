@@ -1,76 +1,79 @@
-# ---------------------------------------------------------------------------
+
 # COMPUTABLE — the figure follows, and the operands span more than one document
 # ---------------------------------------------------------------------------
 
-how many paid days off do I actually get in a year, counting my leaves and the company holidays together
+leave-policy p3 + holiday-policy p3
+1. how many paid days off do I actually get in a year, counting my leaves and the company holidays together
 
-how many of next year's company holidays actually fall on a working day
+holiday-list-2026 p1 + holiday-policy p4
+2. how many of next year's company holidays actually fall on a working day
 
-if I take leave from Monday the nineteenth of October to Friday the twenty third, how many privilege leaves come out of my balance
+leave-policy p7 + holiday-list-2026 p1
+3. if I take leave from Monday the nineteenth of October to Friday the twenty third, how many privilege leaves come out of my balance
 
-# x04  -> 40000, May payroll                 referral-policy p4 + probation-period p4 + separation-policy p21
-I referred two people and they both joined on the first of February, one senior developer with eight years and one engineer with three years. how much do I get and when does it land
+referral-policy p4 + probation-period p4 + separation-policy p21
+4. I referred two people and they both joined on the first of February, one senior developer with eight years and one engineer with three years. how much do I get and when does it land
 
-# x06  -> 9100 (8500 repair + 600 courier)   assets-policy p7 + p8 + separation-policy p11
-I'm resigning. my laptop repair was eleven thousand five hundred and it wasn't under warranty, and the courier to Jaipur is quoting two thousand one hundred. what do I end up out of pocket
+assets-policy p7 + p8 + separation-policy p11
+5. I'm resigning. my laptop repair was eleven thousand five hundred and it wasn't under warranty, and the courier to Jaipur is quoting two thousand one hundred. what do I end up out of pocket
 
-# x07  -> 15 Jun 2026 / 15 Jun 2028          assets-policy p13 + probation-period p4
-I joined on the fifteenth of March and I want a second monitor. when am I eligible, and when would it be mine to keep
+assets-policy p13 + probation-period p4
+6. I joined on the fifteenth of March and I want a second monitor. when am I eligible, and when would it be mine to keep
 
-# x08  -> LWD 30 Jun, one month held         probation-period p4/p6 + separation-policy p5 + p10
-I joined on the first of March and I want to resign on the first of May. how long is my notice and which salaries get held
+probation-period p4/p6 + separation-policy p5 + p10
+7. I joined on the first of March and I want to resign on the first of May. how long is my notice and which salaries get held
 
-# x10  -> 3 encashed, 24 carried forward     leave-policy p11 + p7 + separation-policy p13
-my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December, and what if I resign in March instead
+leave-policy p11 + p7 + separation-policy p13
+8. my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December, and what if I resign in March instead
 
-# x14  -> 2800 (700 x 4; car costs nil)      travel-policy p6 + annual-event-policy p4
-I'm on a four day business trip to Gurgaon and I'm driving my own car. what can I claim
+travel-policy p6 + annual-event-policy p4
+9. I'm on a four day business trip to Gurgaon and I'm driving my own car. what can I claim
 
-# x16  -> 26 May 2026                        annual-event-policy p2 + prevention-of-sexual-harassment-policy p6
-something happened to me at the annual event on the twenty sixth of February. who do I report it to and how long do I have
+annual-event-policy p2 + prevention-of-sexual-harassment-policy p6
+10. something happened to me at the annual event on the twenty sixth of February. who do I report it to and how long do I have
 
-# x18  -> 212 (182 + 30 LOP), gated          leave-policy p15 + p17 + probation-period p4
-I'm still on probation and I'm pregnant. how many days can I take in total
+leave-policy p15 + p17 + probation-period p4
+11. I'm still on probation and I'm pregnant. how many days can I take in total
 
-# x19  -> 3 accrued, none available          performance-management p10 + leave-policy p7
-I've been put on a ninety day performance improvement plan. do I still get my leaves for those months
+performance-management p10 + leave-policy p7
+12. I've been put on a ninety day performance improvement plan. do I still get my leaves for those months
 
 # ---------------------------------------------------------------------------
 # UNDERSPECIFIED — "working days" is never defined; the assumption must be said
 # ---------------------------------------------------------------------------
 
-# x09  -> 29 Sep 2026 to 20 or 22 Oct 2026   separation-policy p10 + holiday-list-2026 p1
-my last working day is the eighteenth of August. by when should my full and final be settled
+separation-policy p10 + holiday-list-2026 p1
+13. my last working day is the eighteenth of August. by when should my full and final be settled
 
-# x17  -> 31 Mar or 1 Apr 2026               assets-policy p3 + holiday-list-2026 p1
-I'm joining from home on the second of March. when should my laptop turn up
+assets-policy p3 + holiday-list-2026 p1
+14. I'm joining from home on the second of March. when should my laptop turn up
 
 # ---------------------------------------------------------------------------
 # CONFLICT — two places give different numbers; surfacing that is the answer
 # ---------------------------------------------------------------------------
 
-# x11  -> 15 vs 3, both correct              leave-policy p7 (12) vs p11 table (24)
-the policy says carry forward is capped at twelve days, so out of twenty seven I should be carrying twelve and encashing fifteen, correct
+leave-policy p7 (12) vs p11 table (24)
+15. the policy says carry forward is capped at twelve days, so out of twenty seven I should be carrying twelve and encashing fifteen, correct
 
-# x15  -> 30 vs 15 days                      travel-policy p3 vs p7 + leave-policy p7 + holiday-policy p4
-I want to take two floaters and three privilege leaves either side of a business trip. how far ahead do I need to get all of this approved
+travel-policy p3 vs p7 + leave-policy p7 + holiday-policy p4
+16. I want to take two floaters and three privilege leaves either side of a business trip. how far ahead do I need to get all of this approved
 
-# x20  -> 16 rows vs a 10-day entitlement    holiday-list-2026 p1 + holiday-policy p4
-how many holidays are on the list for next year
+holiday-list-2026 p1 + holiday-policy p4
+17. how many holidays are on the list for next year
 
 # ---------------------------------------------------------------------------
 # MISSING OPERAND — the days compute, the rupees do not
 # ---------------------------------------------------------------------------
 
-# x12  -> 0.5 day LOP; NO rupee figure       attendance-policy p18 + p19 + leave-policy p7
-I had two missing punches so KEKA deducted a privilege leave, I only had half a day left, and my basic is six lakh. how much is that going to cost me
+attendance-policy p18 + p19 + leave-policy p7
+18. I had two missing punches so KEKA deducted a privilege leave, I only had half a day left, and my basic is six lakh. how much is that going to cost me
 
-# x13  -> eligible; NO amount (no formula)   separation-policy p11 + p22 + leave-policy p7
-I've completed six years and my last drawn basic is sixty thousand a month. what gratuity am I owed
+separation-policy p11 + p22 + leave-policy p7
+19. I've completed six years and my last drawn basic is sixty thousand a month. what gratuity am I owed
 
 # ---------------------------------------------------------------------------
 # TRAP — the premise is wrong twice over
 # ---------------------------------------------------------------------------
 
-# x05  -> 25000, and not payable yet         referral-policy p4 + separation-policy p21 + probation-period p4
-I referred an intern and a senior manager with six years, both of them joined last month. that's forty thousand coming to me, right
+referral-policy p4 + separation-policy p21 + probation-period p4
+20. I referred an intern and a senior manager with six years, both of them joined last month. that's forty thousand coming to me, right
