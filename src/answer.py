@@ -64,7 +64,7 @@ import sys
 from collections import namedtuple
 from contextlib import contextmanager
 
-from src import figures, nlu, retrieval
+from src import dates, figures, nlu, retrieval
 from src.config import PROMPTS_DIR, RETRIEVAL_TOP_K
 
 # v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
@@ -314,6 +314,52 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
         # No model call: see the module docstring. Nothing cleared the floor, so there is no context
         # to be grounded in and no question of what the model might say instead.
         return Answer(REFUSAL, [], [], grounded=False)
+
+    # VOX-034 part D. A question that states a DATE and asks when goes to the date path first, for
+    # the reason src/dates.py opens with: the figure path is right to call a deadline "not a formula",
+    # so a duration question was answered with the sentence read back and no date. Routed before the
+    # figure path and not after it, so a date question still costs ONE model call — the invariant the
+    # figure path kept when it replaced the prose call rather than preceding it. A date question that
+    # cannot be counted falls through to the paths below, which is a second call on a failure path.
+    #
+    # `asks_for_a_date` needs both halves — a date stated and a when-ish question — so a counting
+    # question that happens to name a month ("leave from the nineteenth to the twenty third, how many
+    # PLs is that") stays on the numeric path where it belongs.
+    if dates.asks_for_a_date(transcript):
+        dfig = dates.compute(transcript, hits, turn_id, model_id=model_id,
+                             fallback=fallback, on_fallback=on_fallback)
+        if dfig is not None and dfig.rule:
+            spoken = dfig.spoken()
+            if is_refusal(spoken):
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            # The guard applies here exactly as it does on the figure path, with the derivation's own
+            # numbers added to what counts as grounded: the days and years of the dates Python
+            # counted, the anchor the person gave, and the durations that traced to an excerpt. A
+            # computed date is spoken as "29 September 2026", so without this the guard suppresses
+            # every correct answer this path can give — 29 is in no excerpt, and that is the point.
+            allowed = set()
+            if dfig.computed:
+                for d in (dfig.value, dfig.end, dfig.anchor):
+                    if d is not None:
+                        allowed |= {float(d.day), float(d.year)}
+                for n in (dfig.offset, dfig.offset_end):
+                    if n is not None:
+                        allowed.add(float(n))
+            invented = [v for v in ungrounded_numbers(spoken, hits)
+                        if not any(abs(v - a) < 1e-6 for a in allowed)]
+            if invented:
+                print(f"UNGROUNDED NUMBER on the date path — {arms_repr(invented)} appears in no "
+                      f"excerpt and in no counted date; refusing instead of speaking it.\n"
+                      f"  suppressed reply: {' '.join(spoken.split())}", file=sys.stderr)
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            if dfig.computed:
+                return Answer(spoken, cited(hits), hits, grounded=True)
+            # Nothing counted. Fall through rather than state the rule here: the question may still
+            # be a figure question ("I joined in March, how many leaves by June" states a date and
+            # asks when-ish), and the paths below are the ones that have been measured on it.
+            print(f"date not computed — {', '.join(dfig.missing)}", file=sys.stderr)
 
     # VOX-034 part B. A question that states a number may be asking for one back, and the prose
     # prompt is forbidden from doing arithmetic — so it goes to the figure path instead, where the
