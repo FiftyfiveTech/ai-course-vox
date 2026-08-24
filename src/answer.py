@@ -64,15 +64,20 @@ import sys
 from collections import namedtuple
 from contextlib import contextmanager
 
-from src import nlu, retrieval
+from src import figures, nlu, retrieval
 from src.config import PROMPTS_DIR, RETRIEVAL_TOP_K
 
 # v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
 # answered "you will be paid 12,000" to a leave-encashment question whose excerpt gave a formula and
-# no such number — cited, fluent and wrong. Versioned as a new file rather than edited in place
-# (VOX-018): the old prompt is what the numbers in ARCHITECTURE.md were measured against, and a
-# prompt you can no longer read is a measurement you can no longer reproduce.
-PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v2.md"
+# no such number — cited, fluent and wrong. v3 (VOX-034) adds one thing the guard provably cannot
+# do: correct a false premise. "Your 30 days of paternity leave" has every number traced — 30 is the
+# advance-notice window in the chunk beside the five-day entitlement — so ungrounded_numbers() stays
+# silent and only a prompt can tell a present number from an answering one. Arithmetic did not
+# become allowed; it moved to prompts/compute_figure_v1.md and src/figures.py, where a figure has a
+# checked derivation behind it. Versioned as new files rather than edited in place (VOX-018): v1 and
+# v2 are what the numbers in ARCHITECTURE.md were measured against, and a prompt you can no longer
+# read is a measurement you can no longer reproduce.
+PROMPT_FILE = PROMPTS_DIR / "answer_from_source_v3.md"
 
 # The one refusal, shared by the two paths that can produce it: this module when no chunk clears the
 # floor, and the model when the chunks that did clear it do not contain the answer. Written out
@@ -205,7 +210,16 @@ _UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six"
           "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
           "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
           "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
-_SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
+# "hundred" is a MULTIPLIER inside a group; the rest are scales that close one.
+#
+# Getting that wrong was a real bug, found by VOX-034's figure gate: with "hundred" treated as a
+# closing scale, "six hundred thousand" parsed as (6*100) + (1*1000) = 1600 rather than 600000, and
+# "three hundred and sixty five thousand" as 65300 rather than 365000. Both are how a person says a
+# salary out loud, so the guard was checking spoken currency figures against numbers nobody said —
+# in both directions: a correctly grounded reply could be refused, and an invented figure could pass
+# if the mis-parse happened to land on something in the excerpts.
+_MULTIPLIER = {"hundred": 100}
+_SCALES = {"thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
            "million": 1_000_000, "crore": 10_000_000, "crores": 10_000_000}
 _NUMBER_WORD = re.compile(r"[a-z]+")
 
@@ -248,6 +262,12 @@ def numbers_in(text, parts=False):
             running = True
             if parts:
                 found.add(float(_UNITS[w]))
+        elif w in _MULTIPLIER and running:
+            # Scales the group in progress and does NOT close it, so "six hundred thousand" is
+            # (6 * 100) * 1000 and not 600 + 1000. See the comment on _MULTIPLIER.
+            current = max(current, 1.0) * _MULTIPLIER[w]
+            if parts:
+                found.add(current)
         elif w in _SCALES and running:
             current = max(current, 1.0) * _SCALES[w]
             total += current
@@ -294,6 +314,64 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
         # No model call: see the module docstring. Nothing cleared the floor, so there is no context
         # to be grounded in and no question of what the model might say instead.
         return Answer(REFUSAL, [], [], grounded=False)
+
+    # VOX-034 part B. A question that states a number may be asking for one back, and the prose
+    # prompt is forbidden from doing arithmetic — so it goes to the figure path instead, where the
+    # model names the operands and Python does the sum. See src/figures.py.
+    #
+    # Routed on `states_a_number` and not on a classifier, for the reason turn_reply's docstring
+    # gives about the retrieval floor being the router: a cheap syntactic test that can be read off
+    # the transcript beats a second unmeasured decision. It is also why every query in
+    # evals/dev/pdf_queries.json is unaffected — none of them states a number, so `make gate-poc`
+    # never enters this branch.
+    #
+    # This does NOT add a call to the turn: the figure path replaces the prose call rather than
+    # preceding it, so a numeric question still costs one LLM call. That is the same constraint
+    # turn_reply keeps for the two-path routing above it.
+    if figures.states_a_number(transcript):
+        fig = figures.compute(transcript, hits, turn_id, model_id=model_id,
+                              fallback=fallback, on_fallback=on_fallback)
+        # `None` is an unparseable extraction and `not fig.rule` is an extraction with nothing in it.
+        # Both fall through to the prose prompt below rather than refusing, because v2 already
+        # answers this question correctly — it just will not compute. Costs a second call on a
+        # failure path, which is the right place to spend one.
+        if fig is not None and fig.rule:
+            spoken = fig.spoken()
+            if is_refusal(spoken):
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            # THE GUARD STILL APPLIES, and this is the point of the whole design. The figure path
+            # composes its sentence around a value Python computed, but `rule` is model-authored
+            # prose and can carry a figure of its own — "you will get sixteen days" — which is the
+            # v1 failure with extra steps. So the reply is checked exactly as the prose path is
+            # checked, with the derivation's own numbers added to what counts as grounded: the
+            # computed value, and every operand that traced.
+            #
+            # That is the numeric guard NARROWED, not relaxed. A number the person supplied is still
+            # not grounded by having been asked — it is grounded only as an operand inside a
+            # derivation that checked out, which is why `allowed` is empty when nothing was computed.
+            allowed = set()
+            if fig.computed:
+                allowed.add(float(fig.value))
+                for op in fig.operands:
+                    try:
+                        allowed.add(float(op.get("value")))
+                    except (TypeError, ValueError):
+                        continue
+            invented = [v for v in ungrounded_numbers(spoken, hits)
+                        if not any(abs(v - a) < 1e-6 for a in allowed)]
+            if invented:
+                print(f"UNGROUNDED NUMBER on the figure path — {arms_repr(invented)} appears in no "
+                      f"excerpt and in no checked derivation; refusing instead of speaking it.\n"
+                      f"  suppressed reply: {' '.join(spoken.split())}", file=sys.stderr)
+                return Answer(REFUSAL, [], hits, grounded=False)
+
+            if not fig.computed:
+                # The rule, stated, with no figure — what v2 already asked for and what
+                # evals/dev/figure_queries.json scores as `state_rule`. Grounded: a rule read out of
+                # an excerpt is an answer, and `missing` says why no number came with it.
+                print(f"figure not computed — {', '.join(fig.missing)}", file=sys.stderr)
+            return Answer(spoken, cited(hits), hits, grounded=True)
 
     from src import arms                      # imported here: arms imports nlu, which this imports
     text = arms.llm(

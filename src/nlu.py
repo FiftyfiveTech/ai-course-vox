@@ -96,7 +96,7 @@ def messages(transcript, stage=None, history=None):
     return msgs
 
 
-def openai_chat(arm, msgs, rec, timeout=None, temperature=None):
+def openai_chat(arm, msgs, rec, timeout=None, temperature=None, json_mode=False, max_tokens=None):
     """OpenAI-compatible /chat/completions. Serves every LLM arm — NIM, Groq and ollama all speak it.
 
     `arm.extra["request"]` adds the fields an arm cannot be called without — `reasoning_effort` for
@@ -111,7 +111,12 @@ def openai_chat(arm, msgs, rec, timeout=None, temperature=None):
     """
     body = {"model": arm.provider_model, "messages": msgs,
             "temperature": TEMPERATURE if temperature is None else temperature,
-            "max_tokens": MAX_TOKENS}
+            "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens}
+    # VOX-034: `json_mode` for the figure extractor, which needs a parseable object rather than a
+    # sentence. Same mechanism state.build() already uses; here it is a per-call option because the
+    # same arm serves both the spoken reply and the extraction, and neither is a property of the arm.
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     for k, v in (arm.extra.get("request") or {}).items():
         body.setdefault(k, v)
 

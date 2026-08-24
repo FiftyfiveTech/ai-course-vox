@@ -253,14 +253,23 @@ def stt(audio, model_id=None, *, turn_id, on_fallback=None, fallback=True):
 
 
 def llm(msgs, model_id=None, *, turn_id, on_fallback=None, fallback=True, temperature=None,
-        **extra):
+        json_mode=False, max_tokens=None, **extra):
     """-> the assistant's reply. `msgs` is an OpenAI-shaped message list; see nlu.messages().
 
     `temperature` reaches the backend rather than the log: a grounded answer asks for 0 and a spoken
     reply keeps nlu.TEMPERATURE. It is also recorded, because two turns sampled differently are not
     comparable and a latency table has no way to know.
+
+    `json_mode` and `max_tokens` are the same kind of thing (VOX-034): call options, not arm
+    properties, because one arm serves both the spoken reply and the figure extractor and only the
+    second one wants a parseable object and a bigger ceiling. They go through `options` so every arm
+    reaches them through its own backend rather than through a special case here.
     """
     options = {} if temperature is None else {"temperature": temperature}
+    if json_mode:
+        options["json_mode"] = True
+    if max_tokens is not None:
+        options["max_tokens"] = max_tokens
     result, _arm = _call("llm", resolve("llm", model_id), msgs, turn_id, on_fallback, fallback,
                          options=options, messages=len(msgs),
                          temperature=nlu.TEMPERATURE if temperature is None else temperature,
