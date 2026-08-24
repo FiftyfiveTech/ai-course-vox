@@ -22,12 +22,21 @@
     "value is arithmetic over numbers stated in the named chunk plus numbers the question supplies,",
     "and is written out longhand in 'working' so it can be checked rather than trusted.",
     "",
-    "OPEN DESIGN QUESTION, deliberately not resolved here — see 'requires_decision' below. The",
-    "encashment formula divides by 'number of days within a year' and the corpus never says what",
-    "that number is. Under a strict traced-derivation rule every encashment computation refuses,",
-    "which would make the headline case of this ticket uncomputable as a matter of the DOCUMENT",
-    "rather than of the engineering. That has to be decided before implementation, not discovered",
-    "during it.",
+    "RESOLVED DESIGN DECISION — case g09, decided before the implementation existed. The encashment",
+    "formula divides by 'number of days within a year' and the corpus never values it. Three options",
+    "were on the table: refuse and state the rule; allow 365 as a calendar constant on an allowlist;",
+    "or ask the person for the operand. DECISION: refuse. An operand that traces to neither the",
+    "excerpt nor the person's own words is exactly what the guard exists to stop, and 365-vs-366 as",
+    "an undocumented assumption inside a currency figure is the kind of wrong answer that sounds",
+    "most like a right one.",
+    "",
+    "The consequence is stated plainly rather than buried: the flagship example from",
+    "answer_from_source_v2.md's own changelog stays UNCOMPUTABLE, because the document is",
+    "underspecified. Figure calculation fires only when every operand is present — g03 supplies the",
+    "days-in-year explicitly and computes; g09 withholds it and refuses. 'Let the assistant compute",
+    "figures' therefore delivers less than it sounds like, and that is a property of the corpus.",
+    "There is no allowlist of inferred constants anywhere in this implementation, deliberately: once",
+    "one constant is inferable, the guard is arguing about which constants rather than whether.",
     "",
     "Dev only. evals/heldout/ is sealed as heldout-v1 and is not reopened for this."
   ],
@@ -102,6 +111,15 @@
       "expect": ["leave-policy:p7"],
       "expect_shape": "state_rule",
       "why": "The mirror of g05 — salary present, balance absent. Included as a pair with it because the two fail differently: a system that defaults a missing BALANCE to something (the 12-day carry-forward cap, say, which is in the excerpt) produces a large, confident, wrong currency figure."
+    },
+    {
+      "id": "g09",
+      "q": "my last drawn basic salary was six hundred thousand and I have ten privilege leaves left, what is my encashment",
+      "given": { "last_drawn_basic": 600000, "eligible_balance": 10 },
+      "missing": ["days_in_year"],
+      "expect": ["leave-policy:p7"],
+      "expect_shape": "state_rule",
+      "why": "DECIDED: refuse. Two of the three operands are supplied and the third — 'number of days within a year' — is named by the formula and valued nowhere in the corpus, so the derivation cannot be completed from the excerpt plus the person's words. It reads like the most computable question in the file and is not, which is why it is scored: it is the case a system fails by being helpful. Compare g03, which is the same formula with the days-in-year volunteered and therefore computes. The gap between g03 and g09 is the entire decision, and 365 is never inferred to close it."
     }
   ],
 
@@ -113,18 +131,6 @@
       "expect": ["assets-policy:p8"],
       "expect_shape": "state_rule",
       "why": "A cap, not a formula: 'any courier charges shall not exceed from 1500, any charges over the above shall be approved by the reporting manager & asset manager' (assets-policy:p8 #8). The right answer is the approval rule. The wrong answer computes 1800 - 1500 = 300 and asserts a 300-rupee shortfall as policy — arithmetic the document never authorises. Tests that the figure work is scoped to stated formulas rather than to any question containing numbers."
-    }
-  ],
-
-  "requires_decision": [
-    {
-      "id": "g09",
-      "q": "my last drawn basic salary was six hundred thousand and I have ten privilege leaves left, what is my encashment",
-      "given": { "last_drawn_basic": 600000, "eligible_balance": 10 },
-      "missing": ["days_in_year"],
-      "expect": ["leave-policy:p7"],
-      "expect_shape": "UNDECIDED",
-      "why": "THE OPEN QUESTION, and it must be answered before implementation rather than settled by whatever the code happens to do. The formula's denominator is 'number of days within a year' and the corpus never values it. Three defensible answers: (a) refuse / state the rule, because an operand that traces to neither the excerpt nor the person is exactly what the guard exists to stop; (b) allow 365 as a calendar constant on an explicit allowlist, and accept that 365 vs 366 is now an undocumented assumption in a currency figure; (c) ask the person for it, which no other path in this repo does and which needs a turn shape that does not exist yet. Consequence of (a), stated plainly: the flagship example from answer_from_source_v2.md's own changelog stays uncomputable, and the ticket's figure work only ever fires when the person volunteers the days-in-year. That may be the right outcome; it should be a decision."
     }
   ],
 

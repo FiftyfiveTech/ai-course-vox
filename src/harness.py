@@ -62,7 +62,7 @@ def load_16k_mono(path):
 
 def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=None, echo=None,
                  segment=None, idx=None, plain=None, paced=False, watch=None, after_play=None,
-                 extra=None):
+                 extra=None, history=None):
     """Run one turn on `clip` with the arms in `chosen`. -> TurnRun.
 
     `chosen` maps stage -> Arm, exactly as `arms.select()` returns it.
@@ -84,6 +84,11 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
     `after_play(turn, turn_id, chosen)` runs inside the turn timer once the reply has been spoken.
     It is where a scripted run puts `loop.confirmation_leg`, so the yes/no exchange is timed on this
     turn's record and the *policy* about which turn confirms stays out of the harness.
+
+    `history` is a src.history.History for a scripted multi-turn session (VOX-034), passed
+    straight through to turn_reply. Defaults to None — *not* to a fresh History — for the same
+    reason `idx` defaults to None: scripts/compare_arms.py measures arms, and a rewritten query
+    would change what was retrieved between two rows of the same table.
 
     `extra` is stamped onto the turn record as-is — facts the caller knows and this function cannot,
     such as `input="carried-in"` for a turn running on audio captured during the previous reply.
@@ -160,7 +165,7 @@ def fixture_turn(chosen, clip, source, *, play=True, fallback=True, on_fallback=
             # changes behaviour: `scripts/compare_arms.py` still times the plain reply path.
             answered = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
                                              model_id=chosen["llm"].id, on_fallback=notify,
-                                             fallback=fallback, plain=plain)
+                                             fallback=fallback, plain=plain, history=history)
             reply = answered.text
             say(f"vox says : {reply!r}")
 

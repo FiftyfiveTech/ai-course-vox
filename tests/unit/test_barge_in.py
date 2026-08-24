@@ -454,7 +454,8 @@ def test_only_the_last_turn_of_a_run_is_unwatched(monkeypatch, capsys):
     """Where barge-in is switched on: every reply that has a turn after it is interruptible."""
     watches = []
 
-    def one_turn(chosen, pending=None, watch=False, idx=None):
+    def one_turn(chosen, pending=None, watch=False, idx=None, **kw):
+        # **kw: these tests are about watching and carry-forward, not about VOX-034 history.
         watches.append(watch)
         return loop.TurnResult(True, True, None)
 
@@ -472,7 +473,8 @@ def test_a_carried_capture_is_passed_to_the_next_turn_by_main(monkeypatch):
     cap = FakeCapture()
     seen = []
 
-    def one_turn(chosen, pending=None, watch=False, idx=None):
+    def one_turn(chosen, pending=None, watch=False, idx=None, **kw):
+        # **kw: these tests are about watching and carry-forward, not about VOX-034 history.
         seen.append(pending)
         return loop.TurnResult(True, True, cap if pending is None else None)
 

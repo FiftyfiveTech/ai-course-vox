@@ -475,6 +475,34 @@ def index(rebuild=False, echo=None, dense=None):
     return _INDEX
 
 
+def fuse(hit_lists, k=None):
+    """-> one ranked list of Hits fused from several rankings by reciprocal rank. Best first.
+
+    The same mechanism `Index.search` uses to combine its lexical and dense halves, lifted so a
+    caller can combine whole *queries* the same way (VOX-034 fuses a follow-up with its rewritten
+    form). Rank and not score, for the reason `_rrf` gives: two rankings of the same corpus produced
+    by different queries have incomparable scores, and weighting them would mean inventing an
+    exchange rate and then tuning it.
+
+    A chunk is identified by `(doc_id, chunk_idx)`, which is what makes a chunk the same chunk across
+    two lists. The Hit kept is the one from the list that ranked it best, so its `score`, `dense` and
+    `lex_rank` still describe a real ranking rather than an average of two.
+
+    Ties break on `(doc_id, chunk_idx)` for the reason the module docstring gives: the same input has
+    to produce the same output or no gate number can be re-run.
+    """
+    best, fused = {}, {}
+    for hits in hit_lists:
+        for rank, h in enumerate(hits or (), start=1):
+            key = (h.doc_id, h.chunk_idx)
+            fused[key] = fused.get(key, 0.0) + _rrf(rank)
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, h)
+    out = [best[key][1] for key in fused]
+    out.sort(key=lambda h: (-fused[(h.doc_id, h.chunk_idx)], h.doc_id, h.chunk_idx))
+    return out if k is None else out[:k]
+
+
 def retrieve(query, k=None, floor=None, idx=None, dense_floor=None, turn_id=None, hybrid=None):
     """-> the top `k` chunks for `query` with provenance and scores, best first; `[]` for a miss.
 

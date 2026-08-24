@@ -487,6 +487,19 @@ FUSION_CANDIDATES = int(os.environ.get("VOX_FUSION_CANDIDATES", "20"))
 # the fallback when the encoder cannot load (no weights on this machine, no network on first run).
 HYBRID_RETRIEVAL = os.environ.get("VOX_HYBRID_RETRIEVAL", "1") not in ("0", "false", "False", "")
 
+# --- conversation history (VOX-034) ------------------------------------------------------------
+# How many previous turns a session keeps. Three, because the thing history is for here is
+# resolving a reference — "it", "those", "and privilege leaves" — and a reference reaches back one
+# or two turns in speech, not ten. A longer window costs nothing in latency (the retry is arithmetic
+# over a 331 KB vector file) but it does widen what a rewritten query can drag in, and a query
+# rewritten from a topic three turns dead is worse than no rewrite at all.
+HISTORY_TURNS = int(os.environ.get("VOX_HISTORY_TURNS", "3"))
+
+# Whether history is used at all. Off is exactly pre-VOX-034 behaviour, kept reachable for the same
+# reason HYBRID_RETRIEVAL is: it is the baseline column the follow-up gate measures against, and an
+# A/B whose "before" arm has to be recovered from git history is not an A/B anyone re-runs.
+HISTORY_ENABLED = os.environ.get("VOX_HISTORY", "1") not in ("0", "false", "False", "")
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "

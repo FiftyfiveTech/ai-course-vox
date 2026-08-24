@@ -45,9 +45,10 @@ import time
 from collections import namedtuple
 
 from src import answer as answer_mod, arms, audio, confirm, state, vad
-from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, SAMPLE_RATE, SESSION_MINUTES,
-                        SESSION_QUIET_LIMIT, utf8_console)
+from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, HISTORY_ENABLED, SAMPLE_RATE,
+                        SESSION_MINUTES, SESSION_QUIET_LIMIT, utf8_console)
 from src.errors import RateLimited
+from src.history import History
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
 
 # `pending` is the third fact one_turn has to hand back. A turn that was interrupted already holds
@@ -241,7 +242,7 @@ def confirmation_leg(turn, turn_id, chosen, turn_state, listen=None, play=True, 
     return response
 
 
-def one_turn(chosen, pending=None, watch=False, idx=None):
+def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
     """-> TurnResult(spoken, keep_going, pending). `chosen` maps stage -> Arm.
 
     Three separate facts, because one bool used to carry the first two and they came apart at the TTS
@@ -318,7 +319,7 @@ def one_turn(chosen, pending=None, watch=False, idx=None):
 
         reply = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
                                       model_id=chosen["llm"].id, on_fallback=turn.fallback,
-                                      plain=extract_state)
+                                      plain=extract_state, history=history)
         print(f"vox says : {reply.text!r}" + (
             f"  [intent={turn_state.intent} conf={turn_state.confidence:.2f} "
             f"next={turn_state.next_action}]" if turn_state is not None else ""))
@@ -354,6 +355,16 @@ def one_turn(chosen, pending=None, watch=False, idx=None):
         # confirm.
         if turn_state is not None:
             confirmation_leg(turn, turn_id, chosen, turn_state)
+
+        # VOX-034: remember the exchange, once it is an exchange. After the reply exists and after
+        # it has been spoken, so a turn that failed at TTS is still remembered (the person heard
+        # nothing, but they did say something and the next follow-up refers to it) while a turn that
+        # never got a transcript or never got a reply returned long before this line. A broken turn
+        # in the window would poison the next rewritten query with a fragment of nothing.
+        if history is not None:
+            history.add(transcript, reply.text,
+                        sources=reply.answer.labels if reply.answer else (),
+                        grounded=bool(reply.answer and reply.answer.grounded))
 
     # A watched turn's record closes only once the *next* utterance has been endpointed, because one
     # listener spans both. So this line, and the turn's `ts`, land after the user has spoken again.
@@ -426,6 +437,10 @@ def main():
                              f"session. Bare `--minutes` is config.SESSION_MINUTES "
                              f"(VOX_SESSION_MINUTES, currently {SESSION_MINUTES:g}), which is what "
                              f"`make demo` runs")
+    ap.add_argument("--no-history", action="store_true",
+                    help="answer every turn on its own words, with no conversation history "
+                         "(VOX-034). The pre-VOX-034 loop, for comparing against it without an "
+                         "edit — the same reason --no-kb exists")
     ap.add_argument("--no-kb", action="store_true",
                     help="skip retrieval and answer every turn from the plain reply prompt "
                          "(VOX-032). The pre-RAG loop, for comparing against it without an edit")
@@ -456,6 +471,18 @@ def main():
 
     print(f"\n{CONSENT_NOTICE}\n")
 
+    # VOX-034: one History per session, owned here. Not a module global — two sessions in one
+    # process (the test suite, scripts/compare_arms.py) must not see each other's turns, and a
+    # global would make that a bug that only shows up in the second one. `--no-history` gives the
+    # pre-VOX-034 pipeline back for comparison, the way `--no-kb` gives back the pre-VOX-032 one.
+    history = History(enabled=HISTORY_ENABLED and not args.no_history)
+    if not history.enabled:
+        print("history: off — every turn is answered on its own words "
+              "(the pre-VOX-034 pipeline)")
+    else:
+        print(f"history: last {history.turns.maxlen} turn(s) — a follow-up that refers back is "
+              f"retrieved on the resolved question")
+
     spoken = 0
     pending = None
     # The second clause is the wind-down, and it belongs to timed runs only: the deadline passed
@@ -468,7 +495,8 @@ def main():
             print(f"\n  {budget.clock_str(budget.left_s())} left in this session"
                   if budget.open() else "\n  time is up — one last reply to what you just said.")
         try:
-            result = one_turn(chosen, pending=pending, watch=budget.watch(), idx=idx)
+            result = one_turn(chosen, pending=pending, watch=budget.watch(), idx=idx,
+                              history=history)
         except RateLimited as e:
             # Caught here and not inside the turn: a turn cannot decide the session is over, and
             # the wait is longer than a turn anyway. The turn record already carries the error,
