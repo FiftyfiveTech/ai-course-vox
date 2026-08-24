@@ -526,6 +526,30 @@ DAYS_IN_YEAR = float(os.environ.get("VOX_DAYS_IN_YEAR", "365"))
 # scores near 1.0, and the cost of being wrong is a confident wrong number about someone's pay.
 FORMULA_OVERLAP = float(os.environ.get("VOX_FORMULA_OVERLAP", "0.7"))
 
+# --- the date path (VOX-034 part D) --------------------------------------------------------------
+# Two assumptions the corpus forces, both the same shape as DAYS_IN_YEAR above: needed to answer at
+# all, absent from every document, and therefore said out loud in the reply rather than buried here.
+#
+# A person speaking says "my last working day is the eighteenth of August" and never says the year.
+# The corpus is a 2026 corpus — every policy is "with effect from 01 January 2026" and the only
+# holiday calendar in it is 2026 — so a bare date is read as that year. What this costs: a question
+# asked in December about next March gets the wrong year, silently, unless VOX_ANCHOR_YEAR is set.
+# `dates.spoken()` names the year it used for exactly that reason.
+ANCHOR_YEAR = int(os.environ.get("VOX_ANCHOR_YEAR", "2026"))
+
+# "Within 30-45 working days", "after 21 working days" — no document in this corpus defines a working
+# day. Weekends are excluded under any reading. Whether the company's own published holidays also
+# come out is a judgement, and it moves a real answer: 45 working days from 18 August 2026 is
+# 20 October counting weekends only and 22 October once Gandhi Jayanti and Dusshera come out.
+#
+# On, because the holiday list is a document we have rather than a fact we are inventing — but the
+# dates come from the EXCERPTS RETRIEVED FOR THE TURN and never from a table hardcoded here. So a
+# turn that never retrieved the calendar counts weekends only and says so, and a turn that did
+# retrieve it counts the holidays it actually read. The alternative — a holiday list in config —
+# would make the figure depend on a number no listener can trace to a source.
+WORKING_DAYS_SKIP_HOLIDAYS = os.environ.get(
+    "VOX_WORKING_DAYS_SKIP_HOLIDAYS", "1") not in ("0", "false", "False", "")
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "
