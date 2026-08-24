@@ -24,7 +24,7 @@ probation-period p4/p6 + separation-policy p5 + p10
 7. I joined on the first of March and I want to resign on the first of May. how long is my notice and which salaries get held
 
 leave-policy p11 + p7 + separation-policy p13
-8. my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December, and what if I resign in March instead
+8. my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December
 
 travel-policy p6 + annual-event-policy p4
 9. I'm on a four day business trip to Gurgaon and I'm driving my own car. what can I claim
