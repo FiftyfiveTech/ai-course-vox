@@ -21,6 +21,10 @@ from src.config import PROMPTS_DIR
 # comparison is not really a comparison of how much each arm was allowed to say.
 MAX_TOKENS = 120
 
+# How many prior exchanges to include as context. Each exchange = 1 user + 1 assistant message, so
+# 3 exchanges = 6 messages. Beyond this the benefit flattens while the token cost grows linearly.
+MAX_HISTORY_TURNS = 3
+
 # The default for a *spoken reply*, where a little variation reads as human. Not the default for a
 # grounded answer, which passes its own — see answer.ANSWER_TEMPERATURE.
 TEMPERATURE = 0.3

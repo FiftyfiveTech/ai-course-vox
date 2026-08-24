@@ -31,7 +31,8 @@ def _system_prompt() -> str:
     return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
 
 
-def build(transcript: str, turn_id: str, model_id: str | None = None) -> TurnState:
+def build(transcript: str, turn_id: str, model_id: str | None = None,
+          history: list | None = None) -> TurnState:
     """Extract structured turn state from a transcript.
 
     -> TurnState. Raises pydantic.ValidationError when the LLM returns malformed state,
@@ -40,15 +41,21 @@ def build(transcript: str, turn_id: str, model_id: str | None = None) -> TurnSta
 
     Uses JSON mode (response_format: json_object) so the response is always parseable.
     Falls back to stripping a ```json … ``` fence if the provider ignores the format hint.
+
+    `history` is a list of prior {role, content} messages in OpenAI format. When present,
+    they are inserted between the system prompt and the current user message so that the
+    extractor can resolve cross-references ("and what about that?", "cancel it") correctly.
+    Capped to nlu.MAX_HISTORY_TURNS exchanges to bound token cost.
     """
     from src import arms  # late import: arms imports nlu which is a sibling of this module
+    from src.nlu import MAX_HISTORY_TURNS
 
     arm = arms.resolve("llm", model_id)
 
-    msgs = [
-        {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": transcript},
-    ]
+    msgs = [{"role": "system", "content": _system_prompt()}]
+    if history:
+        msgs.extend(history[-(MAX_HISTORY_TURNS * 2):])
+    msgs.append({"role": "user", "content": transcript})
     body = {
         "model": arm.provider_model,
         "messages": msgs,

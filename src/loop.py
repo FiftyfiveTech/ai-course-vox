@@ -40,16 +40,43 @@ data is read back and waits for a spoken yes or no before it proceeds. One LLM c
 either path; which one ran is visible on the printed line and on the turn record.
 """
 import argparse
+import json
 import sys
 import time
 from collections import namedtuple
 
 from src import answer as answer_mod, arms, audio, confirm, state, vad
-from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, HISTORY_ENABLED, SAMPLE_RATE,
-                        SESSION_MINUTES, SESSION_QUIET_LIMIT, utf8_console)
+from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, HISTORY_ENABLED, RUNS_DIR,
+                        SAMPLE_RATE, SESSION_MINUTES, SESSION_QUIET_LIMIT, utf8_console)
 from src.errors import RateLimited
 from src.history import History
 from src.telemetry import CALLS_LOG, TURNS_LOG, new_turn_id, turn_timer
+
+# Where conversation history is persisted between sessions.
+_MEMORY_FILE = RUNS_DIR / "session_memory.json"
+
+
+def _load_history(history):
+    """Populate `history` with turns saved from the previous session, if any."""
+    if not _MEMORY_FILE.exists():
+        return
+    try:
+        data = json.loads(_MEMORY_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            for t in data:
+                history.add(t["transcript"], t["reply"],
+                            t.get("sources", []), t.get("grounded", False))
+    except Exception:
+        pass
+
+
+def _save_history(history):
+    """Persist conversation history so the next session can load it."""
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    turns = [{"transcript": t.transcript, "reply": t.reply,
+              "sources": t.sources, "grounded": t.grounded}
+             for t in history]
+    _MEMORY_FILE.write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # `pending` is the third fact one_turn has to hand back. A turn that was interrupted already holds
 # the next turn's audio, and returning it is what stops the loop from opening the mic to ask for
@@ -309,12 +336,12 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
         # calls a turn would double the stage that most of the VOX-003 budget is spent in.
         turn_state = None
 
-        def extract_state(text, tid, model_id=None, **_):
+        def extract_state(text, tid, model_id=None, history=None, **_):
             """The plain-reply path, as VOX-019 now writes it: structured state, and its `reply`
             field is what gets spoken. Anything retrieval vouched for goes to the grounded prompt
             instead and never arrives here."""
             nonlocal turn_state
-            turn_state = state.build(text, tid, model_id=model_id)
+            turn_state = state.build(text, tid, model_id=model_id, history=history)
             return turn_state.reply
 
         reply = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
@@ -324,6 +351,10 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
             f"  [intent={turn_state.intent} conf={turn_state.confidence:.2f} "
             f"next={turn_state.next_action}]" if turn_state is not None else ""))
         print("  " + grounding(reply, kb=idx is not None))
+
+        if history is not None:
+            history.append({"role": "user", "content": transcript})
+            history.append({"role": "assistant", "content": reply.text})
 
         try:
             with turn.stage("tts"):
@@ -485,6 +516,10 @@ def main():
 
     spoken = 0
     pending = None
+    if history.enabled:
+        _load_history(history)
+        if history:
+            print(f"  memory: loaded {len(history)} exchange(s) from the last session")
     # The second clause is the wind-down, and it belongs to timed runs only: the deadline passed
     # while the last reply was playing and the user answered it anyway. Their words are already
     # captured, so the session spends one more unwatched turn replying to them rather than exiting
@@ -519,6 +554,10 @@ def main():
                 # Only inside a timed run, and only while the clock agrees: silence here is a
                 # pause, and SESSION_QUIET_LIMIT is what keeps that from meaning "forever".
                 print("  still listening — say something, or Ctrl-C to stop.")
+
+    if history:
+        _save_history(history)
+        print(f"  memory: saved {len(history)} exchange(s) to {_MEMORY_FILE}")
 
     print(f"\n{spoken} turn(s) completed in {budget.clock_str()}.")
     print(f"  calls: {CALLS_LOG}")
