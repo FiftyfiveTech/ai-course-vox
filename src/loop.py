@@ -309,12 +309,12 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
         # calls a turn would double the stage that most of the VOX-003 budget is spent in.
         turn_state = None
 
-        def extract_state(text, tid, model_id=None, **_):
+        def extract_state(text, tid, model_id=None, history=None, **_):
             """The plain-reply path, as VOX-019 now writes it: structured state, and its `reply`
             field is what gets spoken. Anything retrieval vouched for goes to the grounded prompt
             instead and never arrives here."""
             nonlocal turn_state
-            turn_state = state.build(text, tid, model_id=model_id)
+            turn_state = state.build(text, tid, model_id=model_id, history=history)
             return turn_state.reply
 
         reply = answer_mod.turn_reply(transcript, turn_id, idx=idx, turn=turn,
@@ -324,6 +324,10 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
             f"  [intent={turn_state.intent} conf={turn_state.confidence:.2f} "
             f"next={turn_state.next_action}]" if turn_state is not None else ""))
         print("  " + grounding(reply, kb=idx is not None))
+
+        if history is not None:
+            history.append({"role": "user", "content": transcript})
+            history.append({"role": "assistant", "content": reply.text})
 
         try:
             with turn.stage("tts"):
@@ -485,6 +489,7 @@ def main():
 
     spoken = 0
     pending = None
+    history = []
     # The second clause is the wind-down, and it belongs to timed runs only: the deadline passed
     # while the last reply was playing and the user answered it anyway. Their words are already
     # captured, so the session spends one more unwatched turn replying to them rather than exiting
