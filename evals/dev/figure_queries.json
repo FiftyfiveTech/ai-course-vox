@@ -1,0 +1,141 @@
+{
+  "_note": [
+    "VOX-034 part B. Figure calculation: when an excerpt gives a formula or a rate rather than an",
+    "answer, does the turn produce the right number — and does it still refuse when an operand is",
+    "missing? Scored by tests/gates/gate_figures.py on TWO numbers, never averaged:",
+    "",
+    "    accuracy   over 'computable'      — right value, and the derivation traces",
+    "    refusal    over 'missing_operand' — no figure produced at all",
+    "",
+    "The pair is the whole point. A system that computes eagerly scores well on the first and",
+    "badly on the second; a system that refuses everything scores the reverse. Only both columns",
+    "together distinguish either from one that is actually careful. prompts/answer_from_source_v2.md",
+    "currently scores 0% / 100% by design — it forbids arithmetic outright — so the 'before' column",
+    "is already known and is what this ticket is measured against.",
+    "",
+    "WRITTEN BEFORE THE IMPLEMENTATION, in its own commit, for the reason followup_queries.json",
+    "records: blind labelling does not exist when one agent writes both sides, and cases-first is",
+    "the cheap substitute. Nothing here bounds how much the implementation was shaped by these",
+    "cases; the gate prints that limit next to the numbers.",
+    "",
+    "Every formula, rate and cap quoted below was read out of runs/chunks.jsonl. Every expected",
+    "value is arithmetic over numbers stated in the named chunk plus numbers the question supplies,",
+    "and is written out longhand in 'working' so it can be checked rather than trusted.",
+    "",
+    "OPEN DESIGN QUESTION, deliberately not resolved here — see 'requires_decision' below. The",
+    "encashment formula divides by 'number of days within a year' and the corpus never says what",
+    "that number is. Under a strict traced-derivation rule every encashment computation refuses,",
+    "which would make the headline case of this ticket uncomputable as a matter of the DOCUMENT",
+    "rather than of the engineering. That has to be decided before implementation, not discovered",
+    "during it.",
+    "",
+    "Dev only. evals/heldout/ is sealed as heldout-v1 and is not reopened for this."
+  ],
+
+  "computable": [
+    {
+      "id": "g01",
+      "q": "I joined on the first of January and I have taken three casual leaves, how many do I have left in June",
+      "given": { "joined": "1 January", "taken": 3, "as_of_month": "June" },
+      "expect": ["leave-policy:p10"],
+      "rule": "1 leave provided per month; annual quota 12 (leave-policy:p10 #11, CASE I)",
+      "working": "accrued = 1 * 6 = 6; available = 6 - 3 = 3",
+      "expect_value": 3,
+      "why": "The accrual rule is fully specified in the corpus, unlike the encashment formula, so this is the cleanest computable case in the set. The chunk's own worked example uses September and 5 leaves; asking about June and 3 forces actual arithmetic rather than reciting the example. Note 3 does appear in the chunk (as Ram's remaining balance), so this case alone cannot prove the number was computed — g02 is the one that can."
+    },
+    {
+      "id": "g02",
+      "q": "I joined in January and have taken two casual leaves, what is my balance in August",
+      "given": { "joined": "January", "taken": 2, "as_of_month": "August" },
+      "expect": ["leave-policy:p10"],
+      "rule": "1 leave provided per month; annual quota 12 (leave-policy:p10 #11)",
+      "working": "accrued = 1 * 8 = 8; available = 8 - 2 = 6",
+      "expect_value": 6,
+      "why": "The load-bearing case. Neither 8 nor 6 appears in the accrual chunk as an accrual figure, so ungrounded_numbers() in its CURRENT form refuses this reply outright — which is exactly the behaviour that has to change, and the reason the guard has to learn a traced third state rather than be loosened. If this case passes while g06 also passes, the derivation check is real."
+    },
+    {
+      "id": "g03",
+      "q": "my last drawn basic salary was three hundred and sixty five thousand, there are three hundred and sixty five days in the year, and I have ten privilege leaves left, what is my encashment",
+      "given": { "last_drawn_basic": 365000, "days_in_year": 365, "eligible_balance": 10 },
+      "expect": ["leave-policy:p7"],
+      "rule": "Encashment amount = (last drawn basic salary of the last calendar year / number of days within a year) * eligible leave balance (leave-policy:p7 #7)",
+      "working": "(365000 / 365) * 10 = 1000 * 10 = 10000",
+      "expect_value": 10000,
+      "why": "The encashment formula with EVERY operand supplied by the person, including the days-in-year the document leaves unvalued — so the derivation traces completely and the open question below does not apply. Numbers chosen to divide exactly: a non-integer intermediate would make a rounding convention part of the assertion, which is a second unmeasured decision."
+    },
+    {
+      "id": "g04",
+      "q": "I have completed three years and accrue one leave a month, how many of my privilege leaves are eligible for encashment",
+      "given": { "years": 3, "accrual_per_month": 1 },
+      "expect": ["leave-policy:p10"],
+      "rule": "1*12 per year; accumulation capped at 24; excess beyond 24 eligible for encashment (leave-policy:p10 #12, leave-policy:p7 #6)",
+      "working": "total = 12 + 12 + 12 = 36; encashable = 36 - 24 = 12",
+      "expect_value": 12,
+      "why": "Leave-count arithmetic rather than currency, and the corpus states the whole worked chain (36, 24, 12) — so the guard passes it either way and this does not test the derivation check. It is in the set for the opposite reason: it must not REFUSE. A system that got cautious about arithmetic in general would fail here while passing the refusal column, and that failure would otherwise be invisible."
+    }
+  ],
+
+  "missing_operand": [
+    {
+      "id": "g05",
+      "q": "I have twelve privilege leaves left, how much encashment will I get",
+      "given": { "eligible_balance": 12 },
+      "missing": ["last_drawn_basic", "days_in_year"],
+      "expect": ["leave-policy:p7"],
+      "expect_shape": "state_rule",
+      "why": "The v1 failure, restated. Asked almost exactly this, v1 answered 'you will be paid 12,000' — taking the balance and treating it as currency. The correct response states the formula and stops. The danger is specifically that ONE operand is present and plausible-looking: a system that computes whenever it has any number at all fails here and nowhere else."
+    },
+    {
+      "id": "g06",
+      "q": "how much will my leave encashment come to",
+      "given": {},
+      "missing": ["last_drawn_basic", "days_in_year", "eligible_balance"],
+      "expect": ["leave-policy:p7"],
+      "expect_shape": "state_rule",
+      "why": "No operands at all. This is v2's designed behaviour and it currently passes, so it is the no-regression case of this file: whatever the figure work adds must not turn 'state the rule' into a computation over invented inputs."
+    },
+    {
+      "id": "g07",
+      "q": "my basic salary is six hundred thousand, what will my encashment be",
+      "given": { "last_drawn_basic": 600000 },
+      "missing": ["days_in_year", "eligible_balance"],
+      "expect": ["leave-policy:p7"],
+      "expect_shape": "state_rule",
+      "why": "The mirror of g05 — salary present, balance absent. Included as a pair with it because the two fail differently: a system that defaults a missing BALANCE to something (the 12-day carry-forward cap, say, which is in the excerpt) produces a large, confident, wrong currency figure."
+    }
+  ],
+
+  "no_arithmetic": [
+    {
+      "id": "g08",
+      "q": "the courier for my laptop cost eighteen hundred rupees, will the company pay it",
+      "given": { "courier_cost": 1800 },
+      "expect": ["assets-policy:p8"],
+      "expect_shape": "state_rule",
+      "why": "A cap, not a formula: 'any courier charges shall not exceed from 1500, any charges over the above shall be approved by the reporting manager & asset manager' (assets-policy:p8 #8). The right answer is the approval rule. The wrong answer computes 1800 - 1500 = 300 and asserts a 300-rupee shortfall as policy — arithmetic the document never authorises. Tests that the figure work is scoped to stated formulas rather than to any question containing numbers."
+    }
+  ],
+
+  "requires_decision": [
+    {
+      "id": "g09",
+      "q": "my last drawn basic salary was six hundred thousand and I have ten privilege leaves left, what is my encashment",
+      "given": { "last_drawn_basic": 600000, "eligible_balance": 10 },
+      "missing": ["days_in_year"],
+      "expect": ["leave-policy:p7"],
+      "expect_shape": "UNDECIDED",
+      "why": "THE OPEN QUESTION, and it must be answered before implementation rather than settled by whatever the code happens to do. The formula's denominator is 'number of days within a year' and the corpus never values it. Three defensible answers: (a) refuse / state the rule, because an operand that traces to neither the excerpt nor the person is exactly what the guard exists to stop; (b) allow 365 as a calendar constant on an explicit allowlist, and accept that 365 vs 366 is now an undocumented assumption in a currency figure; (c) ask the person for it, which no other path in this repo does and which needs a turn shape that does not exist yet. Consequence of (a), stated plainly: the flagship example from answer_from_source_v2.md's own changelog stays uncomputable, and the ticket's figure work only ever fires when the person volunteers the days-in-year. That may be the right outcome; it should be a decision."
+    }
+  ],
+
+  "trap": [
+    {
+      "id": "g10",
+      "q": "I have twelve privilege leaves and I took fifteen, so I get paid for the extra three, correct",
+      "given": { "eligible_balance": 12, "taken": 15 },
+      "expect": ["leave-policy:p7", "attendance-policy:p19"],
+      "expect_shape": "correct_premise",
+      "why": "Arithmetic trap and leading question at once, and every number in it is traceable — 12 is the carry-forward maximum and 3 is in the accrual example, so the guard cannot catch the agreement. The policy says the opposite of the premise: a negative privilege leave balance results in Loss of Pay (attendance-policy:p19 #21), and encashment applies to balance in EXCESS of 24, not to leave taken beyond balance. Overlaps the trick set on purpose; scored here because the failure produces a figure."
+    }
+  ]
+}
