@@ -54,7 +54,7 @@ def build(transcript: str, turn_id: str, model_id: str | None = None,
 
     msgs = [{"role": "system", "content": _system_prompt()}]
     if history:
-        msgs.extend(history[-(MAX_HISTORY_TURNS * 2):])
+        msgs.extend(history.messages_prefix()[-MAX_HISTORY_TURNS * 2:])
     msgs.append({"role": "user", "content": transcript})
     body = {
         "model": arm.provider_model,

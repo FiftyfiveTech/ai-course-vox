@@ -353,8 +353,7 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
         print("  " + grounding(reply, kb=idx is not None))
 
         if history is not None:
-            history.append({"role": "user", "content": transcript})
-            history.append({"role": "assistant", "content": reply.text})
+            history.add(transcript, reply.text)
 
         try:
             with turn.stage("tts"):
