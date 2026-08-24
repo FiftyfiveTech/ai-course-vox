@@ -124,10 +124,41 @@ def test_an_operand_sourced_as_missing_never_traces():
     assert figures.untraced(ops, [FORMULA], "anything") == ["days_in_year"]
 
 
-def test_a_constant_the_model_supplied_does_not_trace():
-    """The decided behaviour for g09: 365 is a guess about the document, not a fact in it."""
-    ops = [{"name": "days_in_year", "value": 365, "source": "excerpt"}]
-    assert figures.untraced(ops, [FORMULA], "my basic was six hundred thousand") == ["days_in_year"]
+def test_days_in_year_is_the_one_constant_that_may_be_assumed():
+    """DECISION REVERSED. g09 first refused because 365 is not in the corpus; it now computes.
+
+    config.DAYS_IN_YEAR carries the reversal and what it costs. The test is here rather than only in
+    the gate because the allowlist is the thing a future change is most likely to widen by accident.
+    """
+    ops = [{"name": "days_in_year", "value": 365, "source": "constant"}]
+    assert figures.untraced(ops, [FORMULA], "my basic was six hundred thousand") == []
+    # The claimed source is irrelevant — the allowlist is what permits it, not the model's label.
+    ops = [{"name": "number_of_days_in_year", "value": 365, "source": "excerpt"}]
+    assert figures.untraced(ops, [FORMULA], "anything") == []
+
+
+@pytest.mark.parametrize("name,value", [
+    ("days_in_year", 366),          # a leap year is not the assumed constant
+    ("days_in_year", 360),          # nor a banker's year
+    ("last_drawn_basic", 365),      # the number alone earns nothing
+    ("working_days_in_year", 250),  # a different constant the model might know
+    ("tax_rate", 30),
+])
+def test_no_other_constant_traces(name, value):
+    """The boundary. "Which constants" must not quietly become "any constant".
+
+    allowed_constant() matches on the operand NAME, so 365 is acceptable as a days-in-year and
+    nowhere else, and every other number a model might supply from general knowledge still has to
+    come from an excerpt or from the person.
+    """
+    ops = [{"name": name, "value": value, "source": "constant"}]
+    assert figures.untraced(ops, [FORMULA], "no numbers here") == [name]
+
+
+def test_the_constant_is_configurable_so_a_leap_year_is_a_flag_not_an_edit(monkeypatch):
+    monkeypatch.setattr(figures, "DAYS_IN_YEAR", 366.0)
+    assert figures.allowed_constant("days_in_year", 366) is True
+    assert figures.allowed_constant("days_in_year", 365) is False
 
 
 # --- month spans --------------------------------------------------------------------------------

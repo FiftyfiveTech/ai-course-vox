@@ -370,12 +370,17 @@ Deviations: (1) Scope grew mid-ticket. 1887 was written as follow-ups; the reque
             writes the implementation and the eval, so the substitute is commit ordering: cases
             first, in their own commit, with the limit printed in each gate's output and stated in
             each file's `_note`.
-            (3) g09 was left UNDECIDED in the committed eval and decided by the requester before
-            implementation: refuse. The encashment formula divides by "number of days within a year"
-            and the corpus never values it, so the flagship example from v2's own changelog stays
-            uncomputable - a property of the document, not the engineering. No allowlist of inferred
-            constants exists anywhere in the implementation, deliberately: once one constant is
-            inferable, the guard argues about which rather than whether.
+            (3) g09 was left UNDECIDED in the committed eval, decided by the requester as "refuse",
+            and then REVERSED by the requester to "assume 365". Both decisions are recorded in
+            figure_queries.json in order, because a threshold whose history is invisible cannot be
+            told apart from one moved to make a gate pass. The reversal is implemented as ONE named
+            constant in config.DAYS_IN_YEAR, gated by figures.allowed_constant() which matches on the
+            operand's NAME — so 365 traces as a days-in-year and nowhere else, and no other constant
+            a model might supply gets in. What it costs is written down rather than hidden: the figure
+            carries an assumption the listener is never told about, and it is wrong one year in four.
+            g03 and g09 are kept as a pair to keep the boundary testable — g03's days-in-year comes
+            from the person, g09's is assumed, so removing the allowlist makes g09 refuse again while
+            g03 still computes. Both are stable across repeats; see Numbers.
             (4) TWO GATE CRITERIA WERE CORRECTED after a failing run, with the reasons written into
             the gate docstrings because a moved goalpost and a fixed one look identical otherwise.
             `self_sufficient` was asserting non-interference AND retrieval coverage; f07 fails the
@@ -392,10 +397,31 @@ Numbers:    `uv run python tests/gates/gate_followup.py` (2026-08-24), retrieval
                 self_sufficient      1/2 0.500 -> 1/2 0.500   PASS (non-interference)
                 absent_followup      2/2 1.000 -> 2/2 1.000   PASS (answer refuses both columns)
             `uv run python tests/gates/gate_figures.py`, meta-llama/Llama-3.1-8B-Instruct on
-            nvidia-nim, 21 model calls, `cost_usd 0.000000`:
-                accuracy   4/4 = 1.000   floor 1.000   (computable)
+            nvidia-nim, `cost_usd 0.000000`:
+                accuracy   4/4 = 1.000   floor 1.000   (computable)   ** NOT REPRODUCIBLE **
                 refusal    4/4 = 1.000   floor 1.000   (missing_operand)
                 no_arithmetic 1/1, trap 1/1
+            CORRECTED, same day. That 4/4 was ONE RUN and does not reproduce. Three consecutive
+            no-edit runs afterwards scored 2/5, 3/5 and 3/5 (five computable cases by then, g09
+            having moved — see below), with individual cases flipping between runs. The gate now
+            takes `--repeat` (default 2) and a case passes only if every repeat passes, because
+            CLAUDE.md's own standard is that a gate which cannot reproduce its own number is not a
+            gate. At `--repeat 3`, 60 model calls, `cost_usd 0.000000`:
+                accuracy   2/5 = 0.400   floor 1.000   **FAILED**
+                refusal    3/3 = 1.000   floor 1.000
+                no_arithmetic 1/1, trap 1/1
+                g03  [10000.0, 10000.0, 10000.0]      stable
+                g09  [16438.36, 16438.36, 16438.36]   stable
+                g01  [None, None, 3.0]                UNSTABLE
+                g02  [None, 6.0, None]                UNSTABLE
+                g04  [None, None, None]               fails outright
+            The split is not random. Encashment is stable because leave-policy:p7 writes the formula
+            out verbatim, so extraction is a copy. Accrual is unstable because the corpus states no
+            accrual formula at all — leave-policy:p10 gives a worked example ("Ram joined 1st January
+            and avails 5 leaves ... 1*9 = 9") and the extractor has to invent the formula's shape
+            every run, which it does differently. So the figure path is reliable exactly where the
+            document states a formula and unreliable where the rule is only implied by an example.
+            That boundary is the real result of part B.
             `uv run python tests/gates/gate_trick.py`, 27 model calls, `cost_usd 0.000000`:
                 false_premise 1/2, leading 1/2, contradiction_across_turns 0/2
                 traps        2/6 = 0.333   floor 0.600   **FAILED**
@@ -441,3 +467,17 @@ Lessons:    (1) A gate rejected the design twice before it passed, and both reje
             question's framing, and it cannot be instructed out of it. That wants the mechanism the
             figure path got - find what the question's number is attached to in the excerpts and
             compare - which is a ticket, not an attempt.
+
+            (6) The worst number in this ticket is one I reported before checking it twice. The
+            figure gate's first accuracy was 4/4 and I put it in a commit message, on the board and
+            in this file before running it again. It was a single draw from an unstable extractor and
+            three consecutive re-runs scored 2/5, 3/5, 3/5. VOX-026's retro already recorded the
+            discipline that catches this — "two consecutive runs with no edit between them is the
+            whole discipline" — and it was there to be read. The gate now enforces agreement across
+            repeats so the next person cannot make the same mistake by being in a hurry.
+            (7) Tracing every operand does not make the arithmetic right. g02 once returned the
+            formula `1 - 2` — monthly entitlement minus leaves taken, with the month multiplier
+            dropped — and computed -1 leave remaining. Both operands traced, the guard was silent,
+            and the sentence read plausibly. The derivation check validates where the NUMBERS came
+            from and says nothing about whether the FORMULA is the right one, which is the next thing
+            a figure path would need and is not what this one bought.

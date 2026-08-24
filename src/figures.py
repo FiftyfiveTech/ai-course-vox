@@ -23,15 +23,19 @@ the existing numeric guard narrowed rather than widened: `src/answer.py` holds t
 person supplied is not grounded *by having been asked*, and that stays true — a person's number is
 legitimate only as an operand inside a checked derivation, never as an answer on its own.
 
-**No constant is ever inferred, and one measured consequence is accepted.** The encashment formula
-in this corpus divides by "number of days within a year" and the corpus never says what that number
-is (`leave-policy:p7` #7). Under the rule above every encashment question refuses unless the person
-volunteers the days-in-year. That was decided deliberately — see the resolved design decision in
-`evals/dev/figure_queries.json` — and it means the flagship example from v2's own changelog stays
-uncomputable, because the *document* is underspecified. Allowing 365 would put an undocumented
-365-vs-366 assumption inside a currency figure, which is the kind of wrong answer that sounds most
-like a right one. Once one constant is inferable the guard is arguing about *which* constants rather
-than *whether*.
+**Exactly one constant is inferred, and it was a reversal.** The encashment formula in this corpus
+divides by "number of days within a year" and the corpus never says what that number is
+(`leave-policy:p7` #7), so under the rule above every encashment question refused unless the person
+volunteered the figure. VOX-034 first decided to keep that refusal; the decision was then reversed —
+assume 365. `config.DAYS_IN_YEAR` carries the reversal and what it costs, and
+`evals/dev/figure_queries.json` records both decisions in order.
+
+What it costs, stated here because nothing warns about it at run time: 365 is not in the documents,
+so a figure computed with it carries an assumption the listener is never told about, and the
+assumption is wrong one year in four. `allowed_constant()` is the boundary that keeps this from
+spreading — it matches on the operand's NAME, so 365 traces as a days-in-year and nowhere else, and
+every other constant the model might supply from general knowledge still fails to trace. That is what
+stops "which constants" from quietly becoming "any constant". A second entry belongs on a ticket.
 
 **`eval()` is not used.** The expression comes from a remote service, so it is untrusted input. It is
 parsed and walked with an explicit whitelist of node types and operators; anything else raises.
@@ -45,10 +49,10 @@ from collections import namedtuple
 import httpx
 
 from src import errors
-from src.config import PROMPTS_DIR
+from src.config import DAYS_IN_YEAR, PROMPTS_DIR
 from src.telemetry import log_call
 
-PROMPT_FILE = PROMPTS_DIR / "compute_figure_v1.md"
+PROMPT_FILE = PROMPTS_DIR / "compute_figure_v2.md"
 
 # Extraction, not composition: temperature 0 for the same reason state.py uses it. There is nothing
 # for variety to buy when the task is "name the operands".
@@ -184,6 +188,32 @@ def safe_eval(expression, names):
 
 # --- tracing ------------------------------------------------------------------------------------
 
+# The allowlist of inferred constants: operand-name pattern -> value. Exactly one entry, and the
+# narrowness is the design. `days_in_year` is the operand leave-policy:p7's formula names and never
+# values, so without this the encashment questions refuse; see config.DAYS_IN_YEAR for the decision
+# and what it costs. A second entry here should be argued for on a ticket, not added in passing —
+# every constant added is a number a listener is told without being told it was assumed.
+_CONSTANTS = (
+    (lambda n: "day" in n and "year" in n, lambda: DAYS_IN_YEAR),
+)
+
+
+def allowed_constant(name, value):
+    """-> True if `value` is the constant this repo is willing to infer for an operand called `name`.
+
+    Matched on the operand's NAME, not on the number, so 365 traces as a days-in-year and nowhere
+    else. An extractor that labels a salary 365 gets no help from this.
+    """
+    n = re.sub(r"[^a-z]+", " ", (name or "").lower())
+    for matches, const in _CONSTANTS:
+        if matches(n):
+            try:
+                return abs(float(value) - const()) < 1e-6
+            except (TypeError, ValueError):
+                return False
+    return False
+
+
 _MONTHS = {m: i for i, m in enumerate(
     "january february march april may june july august september october november december".split(),
     start=1)}
@@ -254,12 +284,33 @@ def untraced(operands, hits, transcript):
             missing.append(name)
             continue
         source = (op.get("source") or "").strip().lower()
-        if source == "person":
-            known = said
-        elif source == "excerpt":
+        # The one inferred constant, checked before the declared source is consulted: the model may
+        # label days_in_year "excerpt" (it is named in the formula) or "constant", and neither claim
+        # is what makes it acceptable — the allowlist is.
+        if allowed_constant(name, v):
+            continue
+        # A value the PERSON demonstrably said traces whatever the model labelled it. The claimed
+        # source is only load-bearing in the other direction.
+        #
+        # Measured, both directions. The label check exists because the extractor returned
+        # months_accrued = 5 claiming "person" for a question that never said five — it traced under
+        # a plain union because 5 is in the excerpts as Ram's worked example, and produced
+        # 12*5-3 = 57. But holding the label strictly then broke the same case the other way: on a
+        # later run the extractor labelled months_accrued = 6 "excerpt", and six is a month span the
+        # person named, so a correct derivation was thrown away over a mislabel.
+        #
+        # The asymmetry resolves both. What the person said is independently checkable, so a wrong
+        # label about it costs nothing. A number found only in the EXCERPTS still has to be claimed
+        # as an excerpt value — otherwise "person" becomes a way to launder any figure that happens
+        # to appear somewhere in the bundle, which is exactly the 57.
+        if any(abs(v - k) < 1e-6 for k in said):
+            continue
+        if source == "excerpt":
             known = in_excerpts
+        elif source == "person":
+            known = said               # already checked above, so this fails and says why
         else:
-            missing.append(name)        # "missing", or a source it did not name
+            missing.append(name)       # "missing", or a source it did not name
             continue
         # A tolerance, not equality: numbers_in returns floats, and 365000.0 is 365000.
         if not any(abs(v - k) < 1e-6 for k in known):

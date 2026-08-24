@@ -87,6 +87,13 @@ def run_case(case, idx, llm_arm, computable):
 def main():
     ap = argparse.ArgumentParser(description="VOX-034 figure gate")
     ap.add_argument("--cases", type=Path, default=CASES)
+    ap.add_argument("--repeat", type=int, default=2,
+                    help="run every case this many times and require AGREEMENT (default 2). A case "
+                         "passes only if it passes every repeat. Not optional rigour: three "
+                         "consecutive no-edit runs of this gate scored 2/5, 3/5 and 3/5 because the "
+                         "accrual extraction is unstable, so a single run reports whichever number "
+                         "it happened to draw. CLAUDE.md: a gate that cannot reproduce its own "
+                         "number is not a gate.")
     ap.add_argument("--llm", metavar="MODEL_ID", default=None)
     args = ap.parse_args()
 
@@ -112,24 +119,31 @@ def main():
         print(f"--- {group} ({len(cases)}) ---")
         ok_n = 0
         for case in cases:
-            fig, text, hits = run_case(case, idx, llm_arm, group == "computable")
+            trials = [run_case(case, idx, llm_arm, group == "computable")
+                      for _ in range(max(1, args.repeat))]
+            fig, text, hits = trials[0]
             said = " ".join((text or "").split())
+            values = [(f.value if f else None) for f, _t, _h in trials]
 
             if group == "computable":
                 want = case["expect_value"]
-                got = fig.value if fig else None
-                ok = got is not None and abs(got - want) <= TOLERANCE
-                verdict = f"want {want}  got {got}"
+                oks = [v is not None and abs(v - want) <= TOLERANCE for v in values]
+                ok = all(oks)
+                got = values[0]
+                verdict = f"want {want}  got {values if len(values) > 1 else got}"
+                if len(set(oks)) > 1:
+                    verdict += "  <- UNSTABLE across repeats"
                 if not ok:
-                    failures.append(f"{case['id']} computed {got}, expected {want} "
-                                    f"({case['working']})")
+                    failures.append(f"{case['id']} computed {values}, expected {want} "
+                                    f"({case['working']})"
+                                    + ("  [unstable]" if len(set(oks)) > 1 else ""))
             else:
                 # Every other group must produce NO figure. That is one assertion, not three: a cap
                 # turned into a subtraction, an agreed-with false premise and a computation over a
                 # missing operand are the same failure wearing different clothes.
-                got = fig.value if fig else None
-                ok = got is None
-                verdict = ("no figure" if ok else f"PRODUCED A FIGURE: {got}")
+                ok = all(v is None for v in values)
+                got = values[0]
+                verdict = ("no figure" if ok else f"PRODUCED A FIGURE: {values}")
                 if not ok:
                     failures.append(f"{case['id']} produced {got} when it should have stated the "
                                     f"rule ({case.get('expect_shape')})")
@@ -170,6 +184,7 @@ def main():
             n, d = scores[group]
             print(f"  {group:10s} {n}/{d} = {n / d:.3f}   asserted, no figure may be produced")
     print(f"  model calls this run: {len(calls)}   total cost_usd {spend:.6f}")
+    print(f"  repeats per case: {args.repeat} — a case counts as passing only if every repeat did")
 
     if acc < FLOOR_ACCURACY:
         failures.append(f"accuracy {acc:.3f} below floor {FLOOR_ACCURACY:.3f}")

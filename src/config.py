@@ -500,6 +500,24 @@ HISTORY_TURNS = int(os.environ.get("VOX_HISTORY_TURNS", "3"))
 # A/B whose "before" arm has to be recovered from git history is not an A/B anyone re-runs.
 HISTORY_ENABLED = os.environ.get("VOX_HISTORY", "1") not in ("0", "false", "False", "")
 
+# --- the one inferred constant (VOX-034, decision reversed 2026-08-24) --------------------------
+# The encashment formula in leave-policy:p7 divides by "number of days within a year" and the corpus
+# never says what that number is. VOX-034 first decided to refuse rather than assume, so every
+# encashment question stated the rule and computed nothing unless the person volunteered the figure.
+# That decision was reversed: assume 365.
+#
+# What the reversal costs, recorded here because the code cannot warn about it at run time. 365 is
+# not in the documents, so a figure computed with it carries an assumption the person is never told
+# about — and the assumption is wrong one year in four. A leap year makes the same balance worth
+# slightly more than this arithmetic says. The number is env-configurable so a leap-year run is a
+# flag rather than an edit, but nothing detects the year for you.
+#
+# It is ONE named constant and not a general licence to infer, which is the whole boundary: an
+# operand only ever traces to a constant when its name says it is counting days in a year (see
+# figures.allowed_constant). Anything else the model supplies from general knowledge still fails to
+# trace, so "which constants" cannot quietly become "any constant".
+DAYS_IN_YEAR = float(os.environ.get("VOX_DAYS_IN_YEAR", "365"))
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "
