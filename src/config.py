@@ -326,6 +326,26 @@ VAD_SILENCE_MS        = _ep.get("silence_ms",        1_100)
 BARGE_MIN_SPEECH_MS   = _bi.get("min_speech_ms",     200)
 BARGE_SPEECH_THRESHOLD = _bi.get("speech_threshold", 0.7)
 
+# --- self-echo guard (VOX-035) ---------------------------------------------------------------
+# On open speakers the mic hears the reply, the capture is carried into the next turn as its input,
+# and the loop answers itself until the clock runs out. This rejects a capture whose amplitude
+# envelope tracks the reply that was playing — detection, not cancellation; see src/echo.py.
+#
+# Off by default. On headphones there is nothing to reject, and every latency number on the board
+# was measured without it, so turning it on is a per-machine choice and not a change to the demo:
+#
+#   VOX_ECHO_GUARD=1 make demo
+_eg = _cfg.get("echo_guard", {})
+
+ECHO_GUARD = os.environ.get(
+    "VOX_ECHO_GUARD", "1" if _eg.get("enabled", False) else "0"
+) not in ("0", "false", "False", "")
+# Env-overridable on its own because it is the one value that has to be tuned against real
+# acoustics, and the machine that needs tuning is not the machine config.yaml is committed from.
+ECHO_CORR_THRESHOLD = float(os.environ.get("VOX_ECHO_CORR", _eg.get("corr_threshold", 0.60)))
+ECHO_MAX_DELAY_MS   = float(_eg.get("max_delay_ms",  500))
+ECHO_TEXT_OVERLAP   = float(_eg.get("text_overlap",  0.70))
+
 # --- session length (`make demo`) ------------------------------------------------------------
 # How long a conversational run lasts when it is bounded by the clock rather than by a turn count.
 # Three minutes is a demo: long enough to ask a few things, talk over one of them, and hear the

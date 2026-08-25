@@ -251,6 +251,17 @@ a VAD is concerned. Real AEC means a webrtc/speexdsp dependency and a separate t
 machine runs on headphones**, and VOX-026's dry-run has to be done on the demo hardware for exactly
 this reason.
 
+What the self-interrupt hides is the expensive half: the captured reply is carried into the next turn
+as `pending`, and a turn with a `pending` does not open the mic — it transcribes VOX's own reply and
+answers it, so the session talks to itself until the clock runs out. VOX-035 (`src/echo.py`,
+`VOX_ECHO_GUARD=1`, off by default) stops that without cancelling anything: it correlates the mic
+capture's amplitude envelope against what the speaker has actually played and rejects a match. It is
+**detection, not cancellation** — it does not restore barge-in on speakers, and it holds the barge-in
+decision open for `echo.MIN_DECISION_MS` because the measurement says the answer is not available any
+sooner, which costs stop latency and is marked `echo_guard` on the turn record so those runs are not
+averaged in with these. The numbers and their limits: `scripts/measure_echo_guard.py`,
+`docs/learning/vox-035-concepts.md`.
+
 What `abort()` cannot recall is the output device's own buffer — 0.182 s on this machine's MME
 device, which is larger than the stop latency itself. So the printed number is when VOX stopped
 *sending*, and `out_latency_s` is logged beside it as the tail that can still be heard.

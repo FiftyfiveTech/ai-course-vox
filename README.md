@@ -64,7 +64,11 @@ in `ARCHITECTURE.md`.
 
 **Wear headphones.** There is no acoustic echo cancellation and none is in scope. On open speakers
 silero hears Kokoro and the reply interrupts itself, every time — speaker bleed is real speech as far
-as a VAD is concerned.
+as a VAD is concerned. Worse than the interrupt: the captured reply is carried into the next turn as
+its input, so the session answers itself until the clock runs out. If headphones are genuinely not
+an option on a machine, `VOX_ECHO_GUARD=1 make demo` stops the runaway by recognising the reply
+coming back (VOX-035) — it is not echo cancellation, it costs barge-in stop latency, and headphones
+remain the fix.
 
 **The free tiers will refuse you sooner or later.** When Groq or NVIDIA NIM rate-limits, times out or
 5xxs, that stage runs its **local** arm instead of losing the turn — loudly, with both attempts in
@@ -464,7 +468,7 @@ caught: `notes/build-log/VOX/week-report.md`.
 | `evals/dev/*.wav` and `evals/heldout/*.wav` gitignored by `*.wav` | `gate_phase0`, `gate_phase1` and `gate_phase1b` all fail on a clean clone until `scripts/gen_utterances.py` runs, and that needs `libespeak-ng` | add the regeneration step to `make setup`, or track the WAVs |
 | 17 of 23 merged PRs were **self-merged** (`gh pr list --state merged --json author,mergedBy`) | the review rule was followed for the first week and then stopped being followed. `main` is protected; `dev` is not | branch protection on `dev` requiring one approving review — a rule a retro has to check by hand is a rule that decays |
 | `sources/` gitignored (correctly) | no grounded path on a clean clone, and none of the POC numbers is reproducible by a stranger | unavoidable as it stands; a redistributable sample corpus would make the POC gate portable |
-| no acoustic echo cancellation | on open speakers the reply interrupts itself, every time | out of scope: a webrtc/speexdsp dependency and its own ticket. **Demo on headphones** |
+| no acoustic echo cancellation | on open speakers the reply interrupts itself, every time | out of scope: a webrtc/speexdsp dependency and its own ticket. **Demo on headphones.** `VOX_ECHO_GUARD=1` (VOX-035) stops the session answering itself, but does not restore barge-in |
 | the latency target is unmet | 5.6–20.0 s against a 2 s budget | the piper arm is the measured cheapest lever, then the VAD hangover |
 
 ---

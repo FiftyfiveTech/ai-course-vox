@@ -65,6 +65,24 @@ class Playback:
         """
         return round(float(self.stream.latency), 3)
 
+    def reference(self, seconds):
+        """The last `seconds` of what the device has actually pulled. -> float32 mono.
+
+        The far-end reference the self-echo guard correlates a mic capture against (VOX-035).
+        Bounded by `pos` and not by wall clock, so it is what was *emitted* rather than what was
+        queued — the same distinction `played_s` exists for, and the reason a guard built on this
+        needs no clock of its own.
+
+        Whether the reply is still playing at all is the caller's question, not this one's: after
+        `finished` there is nothing going to the speaker but the device buffer's tail, and
+        `speak_and_watch` stops consulting the guard there.
+        """
+        end = min(self.pos, len(self.samples))
+        if end <= 0:
+            return np.zeros(0, dtype="float32")
+        start = max(0, end - int(seconds * self.sample_rate))
+        return self.samples[start:end, 0]
+
     def start(self):
         self.stream.start()
         return self
