@@ -40,7 +40,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import echo                                                    # noqa: E402
-from src.config import ECHO_CORR_THRESHOLD, SAMPLE_RATE                 # noqa: E402
+from src.config import ECHO_CORR_THRESHOLD, SAMPLE_RATE, utf8_console   # noqa: E402
 
 REPLY_RATE = 24_000            # Kokoro's, so the rate change the real path crosses is crossed here
 WINDOWS_MS = (200, 400, 700, 1200)   # 400 is kept in the table: it is why 700 is the floor
@@ -112,6 +112,9 @@ def one_trial(seed, window_ms, ref_s=2.0):
 
 
 def main():
+    # This prints em dashes, and a Windows console encodes to cp1252 unless something has changed
+    # it — which here means they came out as "?" rather than raising. Same helper the loop uses.
+    utf8_console()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--trials", type=int, default=60)
     args = ap.parse_args()
