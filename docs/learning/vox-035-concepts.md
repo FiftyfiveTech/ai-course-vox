@@ -95,6 +95,39 @@ own level, spectrum and pauses are the minimum that makes a short window contain
 
 ---
 
+## 3b · A guard that rearms leaves a residue, and the residue is the bug again
+
+Reported from a real run once the first version was in use: *the guard ran, but sometimes after
+finishing it detected the last words.* Two holes, and neither is a threshold problem.
+
+**The output buffer.** `finished` is when the device stopped *pulling*, not when the room went
+quiet — 0.182 s of buffer is still on its way out on the demo machine, and every millisecond of it
+is audible echo. The guard returned `False` the moment `finished` was set, which is precisely when
+the reply's last words are still in the air. It now keeps looking for the buffer plus one delay
+window, and widens the delay search by however long ago the device stopped: the reference cannot
+advance past the end of the reply, so as the mic runs on, the echo sits further and further back
+inside it.
+
+**The rearm residue.** The envelope guard rearms every time it rejects. Near the end of a reply the
+last rearm leaves a capture of a second or less — below `MIN_DECISION_MS`, so the envelope test
+declines to judge it, and below `min_words`, so the overlap test declines too. It becomes a turn.
+
+The second one cannot be fixed by lowering `MIN_DECISION_MS`: §3's table is why that floor exists.
+It is fixed one layer up, where whisper's words make a *narrower* question askable — not "do these
+words appear in the reply" but "are these words how the reply **ended**". A tail echo is a suffix by
+construction. `tail_slack` is 1, which is the whole trade: at 2, a reply ending "...before two years
+of allotment" makes "two years" a tail and a user asking about those two years loses their turn.
+
+**Why here:** a detector that resets on each firing does not fail cleanly at the boundary — it fails
+by leaving a fragment just under every threshold it has. Worth expecting in anything that rearms.
+
+**Pitfall:** the fix that reaches for `min_words = 2`. That is the same question asked more loosely,
+and it takes VOX-020's "yes, go ahead" with it. A different, stricter question is what was needed —
+and the carried-in path still asks `confirm.classify_response` first, because a real confirmation
+said over a read-back arrives as carried-in audio and no echo rule should be able to eat one.
+
+---
+
 ## 4 · Asymmetric costs decide where a classifier is allowed to act
 
 Two ways to be wrong, and they are not equally bad:

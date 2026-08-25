@@ -29,9 +29,16 @@ class Playback:
         self.pos = 0
         self.finished = threading.Event()
         self.stopped_t = None            # when abort() returned, or None if the reply played out
+        # When the device stopped pulling. Not the same as when the room went quiet: `out_latency_s`
+        # of buffer is still on its way out, and VOX-035's guard has to keep guarding through it.
+        self.finished_t = None
         self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32",
                                       callback=self._callback,
-                                      finished_callback=self.finished.set)
+                                      finished_callback=self._on_finished)
+
+    def _on_finished(self):
+        self.finished_t = time.perf_counter()
+        self.finished.set()
 
     def _callback(self, outdata, frames, time_info, status):
         if self.pos == 0 and self._on_first_audio is not None:

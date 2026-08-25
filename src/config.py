@@ -345,6 +345,7 @@ ECHO_GUARD = os.environ.get(
 ECHO_CORR_THRESHOLD = float(os.environ.get("VOX_ECHO_CORR", _eg.get("corr_threshold", 0.60)))
 ECHO_MAX_DELAY_MS   = float(_eg.get("max_delay_ms",  500))
 ECHO_TEXT_OVERLAP   = float(_eg.get("text_overlap",  0.70))
+ECHO_TEXT_TAIL_SLACK = int(_eg.get("text_tail_slack", 1))
 
 # --- session length (`make demo`) ------------------------------------------------------------
 # How long a conversational run lasts when it is bounded by the clock rather than by a turn count.

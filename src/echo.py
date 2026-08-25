@@ -40,8 +40,12 @@ audio is**, not where it would be most convenient:
                     guarded run, and `echo_guard` on the turn record says so.
 
   the transcript    `echoes_reply`, after STT, on carried-in audio only. Catches what the envelope
-                    could not — an utterance that never reached `MIN_DECISION_MS` because the reply
-                    ended, a machine whose delay is past `max_delay_ms`.
+                    could not — a machine whose delay is past `max_delay_ms`, and the case a real
+                    run reported after the first version shipped: the envelope guard rearms each
+                    time it rejects, so near the end of a reply the residual capture is a second or
+                    less of its final words. Too short for `MIN_DECISION_MS`, too few words for the
+                    overlap rule, and it came back as the next turn's input. `_ends_the_reply` is
+                    the rule for exactly that shape.
 
 There is deliberately no third check when the turn ends. A guard that compares mic audio against
 what the speaker has played needs both to mean the same instant, and at DONE they do not:
@@ -161,7 +165,37 @@ def _words(text):
     return set(_WORD.findall((text or "").lower()))
 
 
-def echoes_reply(transcript, reply, overlap=0.70, min_words=4):
+def _word_list(text):
+    return _WORD.findall((text or "").lower())
+
+
+def _ends_the_reply(said, spoken, tail_slack, min_words=2):
+    """Is `said` a run of words that finishes where the reply finishes? -> bool.
+
+    The shape a tail echo has. When the guard rearms near the end of a reply, what is left is a
+    second or less of the reply's final words — too little for the envelope test to judge (it needs
+    `MIN_DECISION_MS`) and too few words for the overlap test, which needs four to keep VOX-020's
+    "yes, go ahead" out of it. This is the rule for that gap, and it is deliberately narrow: not
+    "these words appear in the reply" but "these words are how the reply ended".
+
+    `tail_slack` is how many words short of the end the run may stop, because the endpointer cuts
+    the capture at its last speech frame and whisper may lose the final word. It is 1, and the
+    second word costs more than it buys: against a reply ending "...before two years of allotment",
+    a slack of 2 makes "two years" a tail, so a user asking a follow-up about those two years loses
+    their turn. At 1, "of allotment" and "years of allotment" are tails and "two years" is not.
+
+    The price of that tightness is a tail whose last two words whisper dropped, which stays missed
+    and costs one bogus turn. That is the cheap direction, and `echo_guard.text_tail_slack` is where
+    to change the trade on a machine that disagrees.
+    """
+    n = len(said)
+    if n < min_words or n > len(spoken):
+        return False
+    return any(spoken[i:i + n] == said and i + n >= len(spoken) - tail_slack
+               for i in range(len(spoken) - n + 1))
+
+
+def echoes_reply(transcript, reply, overlap=0.70, min_words=4, tail_slack=1):
     """Is this transcript the reply we just spoke, heard back? -> bool.
 
     The layer that catches what the envelope missed — a machine whose delay is past `max_delay_ms`,
@@ -176,8 +210,15 @@ def echoes_reply(transcript, reply, overlap=0.70, min_words=4):
     `min_words` keeps "yes" and "no" out of it. A confirmation answer is short by nature and its
     words appear in the read-back it is answering, so VOX-020's gate would lose every "yes, go ahead"
     to this function otherwise.
+
+    Which leaves a gap, and a real run found it: when the guard rearms near the end of a reply the
+    residual capture is a handful of words, below `min_words`, and it came back as a turn. That is
+    `_ends_the_reply` — asked first, because it is the stricter question of the two.
     """
-    t, r = _words(transcript), _words(reply)
-    if len(t) < min_words or not r:
+    said, spoken = _word_list(transcript), _word_list(reply)
+    if not said or not spoken:
         return False
-    return len(t & r) / len(t) >= overlap
+    if _ends_the_reply(said, spoken, tail_slack):
+        return True
+    t = set(said)
+    return len(t) >= min_words and len(t & set(spoken)) / len(t) >= overlap

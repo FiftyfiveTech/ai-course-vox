@@ -447,3 +447,114 @@ def test_a_person_over_the_same_reply_is_still_heard(monkeypatch):
         reject=loop.echo_reject(playback, REPLY_RATE, None))
 
     assert state == DONE and cap is not None, "the guard ate a real utterance"
+
+
+# --- the tail: what a real run reported after the first version shipped ---------------------------
+
+LAPTOP = "What happens to your laptop if you resign before two years of allotment."
+
+
+def test_the_last_words_of_the_reply_are_recognised():
+    """The reported failure. The guard rearms near the end of a reply, the residual capture is a
+    handful of words — below MIN_DECISION_MS for the envelope test and below `min_words` for the
+    overlap test — and it came back as the next turn's input."""
+    assert echo.echoes_reply("under the policy", SPOKEN)
+    assert echo.echoes_reply("of allotment", LAPTOP)
+
+
+def test_a_tail_whisper_clipped_short_is_still_recognised():
+    """The endpointer cuts at its last speech frame, so the final word is often missing."""
+    assert echo.echoes_reply("leave under the", SPOKEN)
+
+
+def test_a_follow_up_quoting_the_middle_of_the_reply_keeps_its_turn():
+    """The cost of `tail_slack`, pinned. At 2, "two years" ends within slack of the reply's end and
+    a user asking about those two years loses their turn; at 1 it does not."""
+    assert not echo.echoes_reply("two years", LAPTOP)
+    assert echo.echoes_reply("two years", LAPTOP, tail_slack=2), \
+        "if this stops being true, the trade-off this test exists to document has moved"
+
+
+def test_a_tail_that_is_not_at_the_end_is_not_a_tail():
+    assert not echo.echoes_reply("your laptop", LAPTOP)
+
+
+def test_a_carried_in_yes_is_never_dropped(monkeypatch):
+    """A real 'yes, go ahead' said over a read-back arrives as carried-in audio, and the tail rule
+    is loose enough to reach one. VOX-020's gate owns what counts as an answer — losing one here
+    would be a confirmed action silently not happening."""
+    monkeypatch.setattr(loop, "ECHO_GUARD", True)
+    read_back = "Booking one hour with Priya tomorrow at three. Shall I go ahead?"
+    stub_turn(monkeypatch, "yes go ahead", reply="Fine.")
+
+    result = loop.one_turn(DEFAULTS, pending=FakeCapture(), last_reply=read_back)
+
+    assert result.spoken is True, "the confirmation was eaten by the echo guard"
+
+
+def test_a_tail_transcript_drops_the_turn_end_to_end(monkeypatch):
+    """The same fix, through one_turn rather than through echoes_reply directly."""
+    monkeypatch.setattr(loop, "ECHO_GUARD", True)
+    stub_turn(monkeypatch, "under the policy")
+
+    result = loop.one_turn(DEFAULTS, pending=FakeCapture(), last_reply=SPOKEN)
+
+    assert result.spoken is False and result.pending is None
+
+
+# --- the buffer tail: the guard used to stop looking one output buffer too early ------------------
+
+def test_the_guard_keeps_looking_through_the_output_buffer(monkeypatch):
+    """`finished` is when the device stopped pulling, not when the room went quiet: 0.182 s of
+    buffer is still on its way out on the demo machine, and it is audible echo. The guard used to
+    return False the moment `finished` was set, which is exactly when the last words escape."""
+    from test_barge_in import fake_speaker
+
+    monkeypatch.setattr(loop, "ECHO_GUARD", True)
+    made = fake_speaker(monkeypatch)
+
+    reply = speechlike(1.0, REPLY_RATE, seed=11)
+    playback = loop.audio.play(reply, sample_rate=REPLY_RATE, block=False)
+    while made[0].pull(2400):                       # play it out; finished_callback fires
+        pass
+    assert playback.finished.is_set() and playback.finished_t is not None
+
+    mic = resample_to(through_a_room(reply, REPLY_RATE), REPLY_RATE, SAMPLE_RATE)
+    heard = mic[len(mic) - int(0.75 * SAMPLE_RATE):]
+
+    assert loop.echo_reject(playback, REPLY_RATE, None)(heard) is True, \
+        "the reply's tail arrived after the device stopped and was taken for the user"
+
+
+def test_long_after_the_reply_the_guard_stands_down(monkeypatch):
+    """The other side of it. Once the buffer and one delay window have passed the room really is
+    quiet, and anything arriving is the user — guarding it would cost a real utterance."""
+    from test_barge_in import fake_speaker
+
+    monkeypatch.setattr(loop, "ECHO_GUARD", True)
+    made = fake_speaker(monkeypatch)
+
+    reply = speechlike(1.0, REPLY_RATE, seed=11)
+    playback = loop.audio.play(reply, sample_rate=REPLY_RATE, block=False)
+    while made[0].pull(2400):
+        pass
+    # Backdate the finish past the buffer and the delay window, without sleeping through it.
+    playback.finished_t -= playback.out_latency_s + 1.0
+
+    mic = resample_to(through_a_room(reply, REPLY_RATE), REPLY_RATE, SAMPLE_RATE)
+    heard = mic[len(mic) - int(0.75 * SAMPLE_RATE):]
+
+    assert loop.echo_reject(playback, REPLY_RATE, None)(heard) is False
+
+
+def test_a_long_echo_containing_a_confirmation_word_is_still_dropped(monkeypatch):
+    """`confirm.classify_response` matches substrings — "booking" contains "ok", so it answers
+    "yes". Unbounded, that would exempt any echo with "book" or "looking" in it from the guard.
+    A real confirmation is short, so the exemption is too."""
+    monkeypatch.setattr(loop, "ECHO_GUARD", True)
+    reply = "I have pencilled in one hour with Priya tomorrow, booking it against the VOX project."
+    stub_turn(monkeypatch, "booking it against the vox project")
+
+    result = loop.one_turn(DEFAULTS, pending=FakeCapture(), last_reply=reply)
+
+    assert result.spoken is False, "a tail echo escaped through the confirmation exemption"

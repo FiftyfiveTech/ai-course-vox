@@ -63,3 +63,13 @@ echo_guard:
   # Second layer, after STT: fraction of the transcript's words that must also appear in the reply
   # just spoken for the turn to be dropped as an echo that got past the envelope test.
   text_overlap: 0.70
+
+  # The same layer's narrow rule, for the case a real run found: when the guard rearms near the end
+  # of a reply the residual capture is a handful of words — too short for the envelope test and too
+  # few words for text_overlap — and it came back as a turn. Such a capture is how the reply *ended*,
+  # so a word run that finishes within this many words of the reply's end is treated as echo.
+  #
+  # 1, not 2. Against a reply ending "...before two years of allotment", a slack of 2 makes "two
+  # years" a tail and costs a user their follow-up; at 1 it does not. Raising it catches more tails
+  # whose last words whisper dropped, and starts eating real utterances that quote the reply.
+  text_tail_slack: 1
