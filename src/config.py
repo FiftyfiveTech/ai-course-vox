@@ -550,6 +550,24 @@ ANCHOR_YEAR = int(os.environ.get("VOX_ANCHOR_YEAR", "2026"))
 WORKING_DAYS_SKIP_HOLIDAYS = os.environ.get(
     "VOX_WORKING_DAYS_SKIP_HOLIDAYS", "1") not in ("0", "false", "False", "")
 
+# --- the grounded answer's token ceiling -------------------------------------------------------
+# nlu.MAX_TOKENS is 120 and every LLM call inherits it unless it passes its own. That is the right
+# guardrail for a spoken reply and the wrong one for a grounded answer: measured over
+# runs/calls.jsonl, three live answers on prompts/answer_from_source_v3.md finished at exactly 120
+# completion tokens with finish_reason "length" — cut mid-sentence, then spoken by TTS, with
+# `ok: true` on the turn because nothing downstream can tell a cut reply from a finished one.
+#
+# v3 is where it started biting. It asks the model to correct a false premise AND then state the
+# rule, so the reply opens with a correction and runs past a budget v1 and v2 answers fit inside.
+# The longest answer that ever finished cleanly was 110 tokens, which is how little headroom 120
+# left. 500 is ~4.5x that, chosen to be far enough above the observed distribution that the cap
+# stops being a second length rule.
+#
+# Brevity is still enforced, just not here: "one or two short sentences" in the prompt is what keeps
+# an answer short. A ceiling can only truncate — it cannot make a reply concise — so its only job is
+# to be high enough that hitting it means something has genuinely gone wrong.
+ANSWER_MAX_TOKENS = int(os.environ.get("VOX_ANSWER_MAX_TOKENS", "500"))
+
 CONSENT_NOTICE = (
     "VOX records microphone audio for this turn only. Audio stays on this machine, is sent to "
     "the STT provider for transcription, and is not written to disk. Internal use only — do not "

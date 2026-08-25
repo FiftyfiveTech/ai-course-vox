@@ -24,7 +24,7 @@ import pytest
 
 from src import answer as answer_mod, arms, nlu, retrieval
 from src.answer import REFUSAL, Answer
-from src.config import FALLBACKS, LLM_ARMS, resolve
+from src.config import ANSWER_MAX_TOKENS, FALLBACKS, LLM_ARMS, resolve
 from src.retrieval import Hit, Index
 
 from test_retrieval import CHUNKS       # same directory; pytest puts tests/unit on sys.path
@@ -411,6 +411,75 @@ def test_the_spoken_reply_path_keeps_its_own_temperature(monkeypatch):
     nlu.reply("hello there", "t")
 
     assert seen[0]["options"] == {}, "no per-call override, so nlu.TEMPERATURE applies"
+
+
+def test_the_grounded_path_does_not_inherit_the_spoken_reply_ceiling(monkeypatch, hits):
+    """nlu.MAX_TOKENS is 120 and every caller that forgets to pass its own gets it. This one did:
+    three live answers on answer_from_source_v3.md finished at exactly 120 completion tokens with
+    finish_reason "length", cut mid-sentence and then spoken. The ceiling is a call option for the
+    same reason the temperature is — a spoken reply and a grounded answer are different tasks on
+    the same arm."""
+    seen = fake_llm(monkeypatch)
+
+    answer_mod.answer("how much casual leave", "t", hits=hits)
+
+    assert seen[0]["options"]["max_tokens"] == ANSWER_MAX_TOKENS == 500
+    assert seen[0]["options"]["max_tokens"] > nlu.MAX_TOKENS
+
+
+def test_the_spoken_reply_path_keeps_the_short_ceiling(monkeypatch):
+    """The other half of the same claim: raising the answer's budget did not raise everyone's. A
+    spoken turn is still short, and the arms are still compared on equal token budgets."""
+    seen = fake_llm(monkeypatch, reply="I can help with that.")
+
+    nlu.reply("hello there", "t")
+
+    assert "max_tokens" not in seen[0]["options"], "no override, so nlu.MAX_TOKENS applies"
+
+
+def test_a_reply_cut_off_at_the_ceiling_is_not_reported_as_a_clean_one(monkeypatch):
+    """A half-sentence reaches TTS exactly as readily as a whole one and the turn still logs
+    `ok: true`, so nothing downstream can tell the two apart. The backend records which it was."""
+    class Response:
+        status_code, text, headers = 200, "", {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "twelve days of casual leave and"},
+                                 "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 900, "completion_tokens": 500}}
+
+    monkeypatch.setattr(nlu.httpx, "post", lambda url, **kw: Response())
+    rec = {}
+
+    text = nlu.openai_chat(resolve("llm", None), [{"role": "user", "content": "hi"}], rec,
+                           max_tokens=ANSWER_MAX_TOKENS)
+
+    assert rec["truncated"] is True
+    assert rec["finish_reason"] == "length"
+    assert text == "twelve days of casual leave and", "the partial answer is still returned"
+
+
+def test_a_reply_that_finished_is_not_flagged_as_truncated(monkeypatch):
+    """The flag has to be able to say no, or a gate reading it learns nothing."""
+    class Response:
+        status_code, text, headers = 200, "", {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Twelve days."}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 900, "completion_tokens": 30}}
+
+    monkeypatch.setattr(nlu.httpx, "post", lambda url, **kw: Response())
+    rec = {}
+
+    nlu.openai_chat(resolve("llm", None), [{"role": "user", "content": "hi"}], rec)
+
+    assert rec["truncated"] is False
 
 
 def test_the_temperature_that_was_used_is_on_the_call_record(monkeypatch, hits, calls_log):

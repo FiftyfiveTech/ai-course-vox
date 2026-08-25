@@ -10,6 +10,7 @@ Phase 0 asks only for a reply. Structured intent extraction is VOX-019, so nothi
 entities — keeping the two apart means the Evaluator can tell which commit satisfied which gate.
 """
 import re
+import sys
 from pathlib import Path
 
 import httpx
@@ -19,6 +20,10 @@ from src.config import PROMPTS_DIR
 
 # A spoken turn is short; this is a guardrail, not a target. Held equal across arms so a latency
 # comparison is not really a comparison of how much each arm was allowed to say.
+#
+# The default only, and only for a *spoken reply*. Every caller with more to say passes its own:
+# config.ANSWER_MAX_TOKENS for the grounded answer, and 512 from state, dates and figures. Adding a
+# caller that forgets to is how three live answers got cut off mid-sentence.
 MAX_TOKENS = 120
 
 # How many prior exchanges to include as context. Each exchange = 1 user + 1 assistant message, so
@@ -139,6 +144,7 @@ def openai_chat(arm, msgs, rec, timeout=None, temperature=None, json_mode=False,
     rec["completion_tokens"] = usage.get("completion_tokens")
     rec["reply_chars"] = len(text)
     rec["finish_reason"] = choice.get("finish_reason")
+    rec["truncated"] = choice.get("finish_reason") == "length"
 
     if not text:
         # A reasoning arm can spend the whole budget thinking and return an empty reply, which
@@ -146,9 +152,25 @@ def openai_chat(arm, msgs, rec, timeout=None, temperature=None, json_mode=False,
         raise RuntimeError(
             f"{arm.id} returned an empty reply "
             f"(finish_reason={choice.get('finish_reason')!r}, "
-            f"{usage.get('completion_tokens')} completion tokens of {MAX_TOKENS}). A reasoning arm "
-            f"needs a reasoning_effort in its config.py request options."
+            f"{usage.get('completion_tokens')} completion tokens of {body['max_tokens']}). "
+            f"A reasoning arm needs a reasoning_effort in its config.py request options."
         )
+
+    if rec["truncated"]:
+        # Not an exception, and below the empty-reply check on purpose: an empty reasoning reply is
+        # also finish_reason "length" and already has a precise error, so warning first would only
+        # add noise to it. Here the text is a real reply that stops mid-sentence, and a listener is
+        # better served hearing most of it than hearing the turn fail — so this says so and returns.
+        #
+        # It says so because nothing downstream can. TTS speaks a half-sentence exactly as readily
+        # as a whole one and `ok: true` goes on the turn either way, so three live answers were cut
+        # this way before anyone noticed, and noticing meant reading calls.jsonl after the fact.
+        # The ceiling is named rather than the env var behind it: this backend serves five callers
+        # with five different ceilings and does not know which one it is answering for.
+        print(f"WARNING: {arm.id} reply hit its {body['max_tokens']}-token ceiling "
+              f"({usage.get('completion_tokens')} completion tokens) and is cut off mid-reply.",
+              file=sys.stderr)
+
     return text
 
 

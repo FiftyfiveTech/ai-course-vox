@@ -65,7 +65,7 @@ from collections import namedtuple
 from contextlib import contextmanager
 
 from src import dates, figures, nlu, retrieval
-from src.config import PROMPTS_DIR, RETRIEVAL_TOP_K
+from src.config import ANSWER_MAX_TOKENS, PROMPTS_DIR, RETRIEVAL_TOP_K
 
 # v2 forbids the model from *computing* a figure from the person's own numbers. v1 did not, and
 # answered "you will be paid 12,000" to a leave-encashment question whose excerpt gave a formula and
@@ -423,6 +423,9 @@ def answer(transcript, turn_id, hits=None, k=None, floor=None, idx=None,
     text = arms.llm(
         messages(transcript, hits), model_id, turn_id=turn_id,
         on_fallback=on_fallback, fallback=fallback, temperature=ANSWER_TEMPERATURE,
+        # Not nlu.MAX_TOKENS: 120 is a spoken reply's guardrail and it cut three live answers off
+        # mid-sentence. See config.ANSWER_MAX_TOKENS for the measurement.
+        max_tokens=ANSWER_MAX_TOKENS,
         prompt_file=PROMPT_FILE.name, transcript_chars=len(transcript),
         chunks=len(hits), sources=[h.source for h in hits],
         top_score=round(hits[0].score, 4),
