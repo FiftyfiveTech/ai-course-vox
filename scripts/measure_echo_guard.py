@@ -142,7 +142,7 @@ def main():
               f"{p.max():>10.3f} {p.mean():>11.3f} | {lost * 100:>10.1f}%")
 
     print(f"\n  worst speech-lost rate at or above MIN_DECISION_MS: {worst * 100:.1f}%")
-    print("  Synthetic. This is the mechanism working, not a threshold for your machine — see the\n"
+    print("  Synthetic. This is the mechanism working, not a threshold for your machine — the\n"
           "  module docstring says how to make your machine report its own correlations.")
     return 0
 
