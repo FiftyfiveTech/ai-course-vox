@@ -1,0 +1,284 @@
+{
+  "_note": [
+    "VOX-034 part C, candidate set. Questions that need BOTH halves of this ticket at once: a figure",
+    "that has to be computed, and operands that live in more than one document. Nothing reads this",
+    "file yet — gate_figures.py scores evals/dev/figure_queries.json and gate_followup.py scores",
+    "followup_queries.json. This is the pool those two draw from next, not a third gate.",
+    "",
+    "Why the pair matters. Every case in figure_queries.json computes inside ONE chunk: the rule and",
+    "the operands are on the same page, so retrieval only has to land once. Here the rule is in one",
+    "document and at least one operand is in another, which puts two failures in front of the",
+    "arithmetic rather than one — retrieve both, or compute from half the inputs and never notice. A",
+    "single-source figure gate cannot see that failure at all.",
+    "",
+    "Groups, and what each is FOR:",
+    "  computable      — every operand traces to a named chunk or to the person's own words. Right",
+    "                    value AND a derivation that names both documents.",
+    "  underspecified  — the figure exists only under an assumption the corpus never states",
+    "                    ('working days' — do the 2026 holidays count?). A bare number is wrong here",
+    "                    even when it is arithmetically right; the assumption must be said out loud,",
+    "                    the way config.DAYS_IN_YEAR is said out loud in g09.",
+    "  conflict        — two documents give different numbers for the same thing. Both are",
+    "                    computable, so the guard cannot break the tie. Surfacing the conflict is the",
+    "                    correct answer; picking a side silently is the failure.",
+    "  missing_operand — the chain runs out. Days are computable, rupees are not, because the corpus",
+    "                    holds no formula for the money part.",
+    "  trap            — arithmetic the documents never authorise, or a premise that is wrong.",
+    "",
+    "The four hardest cases, and they are hard for four different reasons:",
+    "  x03  the operand is a ROW IN A CALENDAR, not a rate — 20-Oct-26 has to be recognised as a",
+    "       fixed holiday in holiday-list-2026 before leave-policy's 'intervening holidays are not",
+    "       counted' can be applied. Off-by-one is the whole answer here.",
+    "  x12  the tempting formula is in the corpus and is the WRONG one. Nothing gives a per-day",
+    "       salary, so the encashment formula in leave-policy:p7 is the only division available and",
+    "       the question hands it every operand.",
+    "  x13  eligibility is stated, the formula is not — separation-policy defers to the Payment of",
+    "       Gratuity Act by name. 15/26 is general knowledge, not corpus, and allowed_constant() must",
+    "       not grow to admit it. This is the case that keeps 'which constants' from becoming 'any",
+    "       constant'.",
+    "  x11  the corpus contradicts itself in figures. leave-policy:p7 caps carry-forward at 12; the",
+    "       table on p11 carries 24 forward twice. 15 and 3 are both arithmetically correct.",
+    "",
+    "Every rule, rate, cap and calendar row quoted below was read out of runs/chunks.jsonl before it",
+    "was written here, per the rule pdf_queries.json set. Every expected value is arithmetic over",
+    "numbers stated in the named chunks plus numbers the question supplies, written out longhand in",
+    "'working' so it can be checked rather than trusted. Date arithmetic was computed, not eyeballed:",
+    "weekday labels for 2026 are from the calendar, and the working-day counts in x09 and x17 are",
+    "given under both readings.",
+    "",
+    "Dev only. evals/heldout/ is sealed as heldout-v1 and is not reopened for this. Written by the",
+    "same agent that would implement against them, so cases-first is the only protection here and it",
+    "bounds nothing — the same limit followup_queries.json records, printed next to any number these",
+    "ever produce."
+  ],
+
+  "computable": [
+    {
+      "id": "x01",
+      "q": "how many paid days off do I actually get in a year, counting my leaves and the company holidays together",
+      "expect": ["leave-policy:p3", "holiday-policy:p3"],
+      "docs": 2,
+      "rule": "24 leaves per year comprising CL and PL (leave-policy:p3 #1); 10 paid holidays in a calendar year (holiday-policy:p3 #1, holiday-policy:p4 #2)",
+      "working": "24 + 10 = 34",
+      "expect_value": 34,
+      "why": "The simplest cross-document sum in the set, and it is first because it is the one a single-chunk retriever fails most quietly: leave-policy alone answers 24 and reads as complete. Nothing in either document says the two totals combine, so the derivation has to name both. The follow-up figure is x02 — 34 is the entitlement, not the days a person is actually away."
+    },
+    {
+      "id": "x02",
+      "q": "how many of next year's company holidays actually fall on a working day",
+      "expect": ["holiday-list-2026:p1", "holiday-policy:p4"],
+      "docs": 2,
+      "rule": "8 fixed holidays listed for 2026, two of them marked Weekend — Independence Day 15-Aug-26 Saturday and Diwali 8-Nov-26 Sunday (holiday-list-2026:p1 #0); 10 holidays total of which up to 2 may be availed as floaters (holiday-policy:p4 #2)",
+      "working": "fixed falling on weekdays = 8 - 2 = 6; plus 2 floaters = 8 of the 10",
+      "expect_value": 6,
+      "why": "The operand is a Remarks column, not a number — the count comes from reading 'Weekend' twice in a table. The policy document supplies the 10 and the floater entitlement; the list supplies which rows are dead. Neither document computes 6 anywhere, so this one cannot be recited."
+    },
+    {
+      "id": "x03",
+      "q": "if I take leave from Monday the nineteenth of October to Friday the twenty third, how many privilege leaves come out of my balance",
+      "given": {"from": "19 October 2026", "to": "23 October 2026"},
+      "expect": ["leave-policy:p7", "holiday-list-2026:p1"],
+      "docs": 2,
+      "rule": "Intervening weekends and holidays are not counted as privilege leave days (leave-policy:p7 #7); Dusshera 20-Oct-26 Tuesday is a fixed holiday and Mahav Navmi / Durga Pooja 19-Oct-26 Monday is a Floater Leave occasion (holiday-list-2026:p1 #0, #1)",
+      "working": "19-23 Oct 2026 is 5 weekdays with no weekend inside; 20 Oct is a fixed holiday and is not counted; 5 - 1 = 4 PL",
+      "expect_value": 4,
+      "why": "The hardest computable case. The rule is in leave-policy and the operand is a row in a calendar in a different document, so the arithmetic is trivial and the retrieval is not. A system that never opens the holiday list answers 5 — right method, wrong by one, and the error is invisible without the second source. A second figure worth stating and not required: 19 Oct is itself a floater occasion, so 3 PL and 1 floater if applied 15 days ahead (holiday-policy:p4 #3)."
+    },
+    {
+      "id": "x04",
+      "q": "I referred two people and they both joined on the first of February, one senior developer with eight years and one engineer with three years. how much do I get and when does it land",
+      "given": {"referral_1": "8 years, senior developer", "referral_2": "3 years, engineer", "both_joined": "1 February"},
+      "expect": ["referral-policy:p4", "probation-period:p4", "separation-policy:p21"],
+      "docs": 3,
+      "rule": "Referral incentive 25,000 for Senior Software Developers and similar at 5 years and above, 15,000 for Software Developers / Engineers at 1-4 years (referral-policy:p4 #2, #3); paid with salary after the referred candidate completes 3 months, credited to the payroll of the falling month (referral-policy:p4 #3, p5 #4); released only once the candidate has completed the three-month probation (separation-policy:p21 #26); probation for an Experienced Professional is 3 months (probation-period:p4 #2)",
+      "working": "25000 + 15000 = 40000; 1 February + 3 months = 1 May, so it is credited in that month's payroll",
+      "expect_value": 40000,
+      "why": "Three documents, and the third is the reason the case is interesting: the 3 months that gate the payout are the CANDIDATE's probation, not the referrer's tenure. Two experience brackets in one question forces the grade table to be read as a table rather than matched to whichever row retrieval surfaced first."
+    },
+    {
+      "id": "x06",
+      "q": "I'm resigning. my laptop repair was eleven thousand five hundred and it wasn't under warranty, and the courier to Jaipur is quoting two thousand one hundred. what do I end up out of pocket",
+      "given": {"repair_cost": 11500, "under_warranty": false, "courier_quote": 2100},
+      "expect": ["assets-policy:p7", "assets-policy:p8", "separation-policy:p11"],
+      "docs": 2,
+      "rule": "Company bears up to INR 3000 of repair cost not covered by brand warranty (assets-policy:p7 #7); courier for asset return to Jaipur Head Office reimbursed up to 1500, refundable in FNF, anything higher requiring prior Asset Manager approval (assets-policy:p8 #8); courier reimbursement and PL encashment are components of the Full & Final Settlement (separation-policy:p11 #14)",
+      "working": "repair borne by employee = 11500 - 3000 = 8500; courier reimbursed = 1500 and unapproved excess = 2100 - 1500 = 600; out of pocket = 8500 + 600 = 9100",
+      "expect_value": 9100,
+      "why": "Two caps in one answer, which is the composition g08 tests in isolation — there, subtracting from a cap was the WRONG move. Here it is right for the repair (the company bears up to 3000 of a stated cost) and wrong for the courier (600 is not a shortfall, it is an amount needing approval). Same shape, opposite treatments, and separation-policy is what ties either to the F&F the question is really about."
+    },
+    {
+      "id": "x07",
+      "q": "I joined on the fifteenth of March and I want a second monitor. when am I eligible, and when would it be mine to keep",
+      "given": {"joined": "15 March 2026"},
+      "expect": ["assets-policy:p13", "probation-period:p4"],
+      "docs": 2,
+      "rule": "Peripherals only after completing 3 months of employment; retained if 2 calendar years are completed as a full-time employee from the date of allotment (assets-policy:p13 #14); probation for an Experienced Professional is 3 months (probation-period:p4 #2)",
+      "working": "eligible 15 March 2026 + 3 months = 15 June 2026, the same date probation ends; retention 15 June 2026 + 2 calendar years = 15 June 2028",
+      "expect_value": "2026-06-15 eligible, 2028-06-15 retention",
+      "why": "Date arithmetic rather than currency, and the two documents agree on the number by coincidence — 3 months is both the peripheral wait and the probation period. That coincidence is the trap: they are separate rules and a reply citing only one has no way to say so. Also the first case whose answer is two dates, which a TTS voice has to read as dates."
+    },
+    {
+      "id": "x08",
+      "q": "I joined on the first of March and I want to resign on the first of May. how long is my notice and which salaries get held",
+      "given": {"joined": "1 March 2026", "resigning": "1 May 2026"},
+      "expect": ["probation-period:p4", "separation-policy:p5", "separation-policy:p10"],
+      "docs": 2,
+      "rule": "Probation is 3 months (probation-period:p4 #2); either side may terminate during probation with two months' notice or payment in lieu (probation-period:p6 #4); a full-time employee on probation serves 2 months' notice against 3 months for a confirmed employee (separation-policy:p5 #4); a last working day falling after the 20th holds only the current month's salary (separation-policy:p10 #12)",
+      "working": "probation runs 1 March to 31 May, so 1 May is inside it; notice = 2 months from 1 May, last working day 30 June; 30 June is after the 20th, so one month's salary (June) is held",
+      "expect_value": "2026-06-30 last working day, 1 month held",
+      "why": "Two documents that AGREE, which is the case a conflict-hunting system gets wrong in the other direction. The figure turns entirely on a date comparison the question never states — whether 1 May is inside probation — so a reply that answers 3 months has picked the confirmed-employee row without checking. The salary-hold rule then keys off the derived date, not off anything in the question: two dependent steps, and step two is only right if step one was."
+    },
+    {
+      "id": "x10",
+      "q": "my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December, and what if I resign in March instead",
+      "given": {"opening_balance": 16, "annual_quota": 12, "availed": 1},
+      "expect": ["leave-policy:p11", "leave-policy:p7", "separation-policy:p13"],
+      "docs": 2,
+      "rule": "Accumulation capped at 24, excess treated as Surplus in December and subject to encashment, encashment processed in March (leave-policy:p7 #6); the 2026 row of the PL table reads 16 / 12 / 1 / 27 with 24 carried forward and 3 encashed (leave-policy:p11 #13); on resignation the accumulated balance is encashed in the full and final settlement (leave-policy:p10 #12, separation-policy:p13)",
+      "working": "16 + 12 - 1 = 27; encashed = 27 - 24 = 3; carried forward = 24",
+      "expect_value": 3,
+      "why": "The table on p11 states 27 and 3 outright, so the arithmetic can be recited — deliberately, because that makes this the case that must not REFUSE, the role g04 plays in the single-source set. The second clause is what needs the other document: resigning in March moves the same balance out of a December Surplus calculation and into an F&F encashment, and separation-policy is where that is written. Paired with x11, which asks for the same number under the contradicting rule."
+    },
+    {
+      "id": "x14",
+      "q": "I'm on a four day business trip to Gurgaon and I'm driving my own car. what can I claim",
+      "given": {"trip_days": 4, "transport": "personal car"},
+      "expect": ["travel-policy:p6", "annual-event-policy:p4"],
+      "docs": 2,
+      "rule": "Meals reimbursed up to INR 700 per person per day on business travel; cabs from the destination hotel to the office in Jaipur / Gurgaon / Indore up to INR 200 per person per day (travel-policy:p6 #5); employees using personal transport bear fuel, maintenance, tolls and parking themselves and the company reimburses none of it (annual-event-policy:p4 #2, the Personal Transport policy)",
+      "working": "meals = 700 * 4 = 2800; cabs = 0 because no cab expenditure was incurred; personal car costs = 0 by policy; total = 2800",
+      "expect_value": 2800,
+      "why": "A cap times a count, which is the one multiplication the travel document authorises — and a second document that zeroes the other half of the question. The trap value is 3600: adding 200 * 4 for cabs never taken, treating an entitlement ceiling as an allowance. The Personal Transport policy is filed inside annual-event-policy rather than travel-policy, so the document that answers the car half is not the one the question sounds like."
+    },
+    {
+      "id": "x16",
+      "q": "something happened to me at the annual event on the twenty sixth of February. who do I report it to and how long do I have",
+      "given": {"incident_date": "26 February 2026"},
+      "expect": ["annual-event-policy:p2", "prevention-of-sexual-harassment-policy:p6"],
+      "docs": 2,
+      "rule": "All employees must adhere to the POSH policy at the event and should reach out to HR-Sanchi (annual-event-policy:p2 #0); a complaint may be submitted in writing to any member of the ICC within 3 months of the occurrence of the incident (prevention-of-sexual-harassment-policy:p6 #6)",
+      "working": "26 February 2026 + 3 months = 26 May 2026",
+      "expect_value": "2026-05-26",
+      "why": "The event document names the person, the POSH document holds the clock, and neither answers the question alone. The rest of the chain is in the corpus and is worth stating without arithmetic on it: respondent notified within 7 days, reply within 10, inquiry within 90, findings within 10 of completion, action within 60 (prevention-of-sexual-harassment-policy:p6 #6, #7, p9 #12). Summing that chain into a single 'your case ends by' date is the over-computation to avoid — those stages start on events, not on the complaint date."
+    },
+    {
+      "id": "x18",
+      "q": "I'm still on probation and I'm pregnant. how many days can I take in total",
+      "expect": ["leave-policy:p15", "leave-policy:p17", "probation-period:p4"],
+      "docs": 2,
+      "rule": "182 calendar days for childbirth (leave-policy:p15 #18); on exhaustion, an extension of a maximum of 30 days as Loss of Pay subject to approval (leave-policy:p17 #21); new joinees may avail the balance after serving 80 days (leave-policy:p16 #19); employees on probation may not be eligible for privilege and additional leave entitlement until confirmation (probation-period:p4 #2), and maternity sits under Additional Leaves in the leave taxonomy (leave-policy:p3 #1)",
+      "working": "182 + 30 = 212 calendar days, of which the last 30 are unpaid and need approval",
+      "expect_value": 212,
+      "why": "The sum is easy and the qualification is the answer: probation-period excludes probationers from additional leave entitlement, leave-policy gates new joinees at 80 days served, and maternity is classified as an Additional Leave in a third chunk. A reply that gives 212 and stops is arithmetically right and practically wrong. Filed as computable rather than conflict because the documents do not contradict — one states a total, the other an eligibility gate."
+    },
+    {
+      "id": "x19",
+      "q": "I've been put on a ninety day performance improvement plan. do I still get my leaves for those months",
+      "given": {"pip_days": 90},
+      "expect": ["performance-management:p10", "leave-policy:p7"],
+      "docs": 2,
+      "rule": "PIP duration typically 15 to 90 days; employees under an active PIP are not eligible to opt for or avail any type of leave, nor for appraisal, increment, promotion or bonus during the period (performance-management:p10 #9, p12 #11); PL entitlement is prorated monthly and credited at the beginning of each month (leave-policy:p7 #6); Casual Leave cannot be applied during a PIP (leave-policy:p5 #4)",
+      "working": "90 days is 3 months at 1 leave accrued per month = 3 leaves credited and unusable for the duration",
+      "expect_value": 3,
+      "why": "Accrual and availment are different things and only the second is suspended — that distinction is split across two documents, so a reply sourced from either alone answers a different question than the one asked. The arithmetic is g01's accrual rule applied to a duration that comes from the performance document."
+    }
+  ],
+
+  "underspecified": [
+    {
+      "id": "x09",
+      "q": "my last working day is the eighteenth of August. by when should my full and final be settled",
+      "given": {"last_working_day": "18 August 2026"},
+      "expect": ["separation-policy:p10", "holiday-list-2026:p1"],
+      "docs": 2,
+      "rule": "F&F processed and cleared within 30-45 working days from the last working day, after No Dues from all departments (separation-policy:p10 #12, p21 #25)",
+      "working": "30 working days from 18 Aug 2026 = 29 Sep 2026 under both readings; 45 working days = 20 Oct 2026 counting weekends only, or 22 Oct 2026 if the 2026 fixed holidays inside the window (Gandhi Jayanti 2 Oct, Dusshera 20 Oct) are also excluded",
+      "expect_shape": "computed_with_assumption",
+      "why": "'Working days' is never defined in the corpus, and the answer moves by two days depending on whether the holiday list counts. What makes this a good case rather than a bad one is the asymmetry: the 30-day bound is 29 September under BOTH readings because no fixed holiday falls inside it, and only the upper bound is ambiguous. The honest answer is a range with the assumption named — the g09 shape, an assumed operand said out loud, except that here no config flag settles it and both readings are defensible."
+    },
+    {
+      "id": "x17",
+      "q": "I'm joining from home on the second of March. when should my laptop turn up",
+      "given": {"joining": "2 March 2026", "location": "home"},
+      "expect": ["assets-policy:p3", "holiday-list-2026:p1"],
+      "docs": 2,
+      "rule": "Laptop dispatched after 21 working days from the date of joining for employees joining from home, against 7 working days for Gurgaon and Indore office joiners (assets-policy:p3 #2)",
+      "working": "21 working days from 2 Mar 2026 = 31 Mar 2026 counting weekends only, or 1 Apr 2026 if Holi on 4-Mar-26 Wednesday is excluded as a fixed holiday (holiday-list-2026:p1 #0)",
+      "expect_shape": "computed_with_assumption",
+      "why": "The same undefined 'working days' as x09, on a much shorter window where one holiday moves the answer by a full day — and where the wrong figure is one a new joiner will act on. Kept separate because it carries a retrieval trap too: the 7-day figure sits in the same sentence as the 21, and 'from home' is the only thing in the question that selects between them."
+    }
+  ],
+
+  "conflict": [
+    {
+      "id": "x11",
+      "q": "the policy says carry forward is capped at twelve days, so out of twenty seven I should be carrying twelve and encashing fifteen, correct",
+      "given": {"balance": 27},
+      "expect": ["leave-policy:p7", "leave-policy:p11"],
+      "docs": 1,
+      "rule": "'Leaves that are entitled to be carried forward will be up to the days as maximum of 12 in a year' AND 'the maximum accumulation of privilege leave balances is capped at a maximum of 24 days' (both leave-policy:p7 #6); the table carries 24 forward in both the 2026 and 2027 rows (leave-policy:p11 #13)",
+      "working": "under the 12-day carry-forward: 27 - 12 = 15 encashed; under the 24-day cap and the table: 27 - 24 = 3 encashed",
+      "expect_shape": "surface_conflict",
+      "why": "Both numbers are arithmetically correct from stated rules, so no derivation check can break the tie and the guard passes either one. The leading 'correct' makes it an agreement trap on top — the g10 shape, except the premise is not wrong, it is one of two incompatible things the corpus says. The failure to catch is a confident 15 with a clean-looking derivation. Same balance as x10 on purpose: x10 is the number the table gives, x11 the number the prose gives. The only single-document case in the file, kept because a cross-PAGE contradiction inside one policy is the same retrieval problem and the cheapest one to reproduce."
+    },
+    {
+      "id": "x15",
+      "q": "I want to take two floaters and three privilege leaves either side of a business trip. how far ahead do I need to get all of this approved",
+      "expect": ["travel-policy:p3", "travel-policy:p7", "leave-policy:p7", "holiday-policy:p4"],
+      "docs": 3,
+      "rule": "Travel 'should be approved and informed to the HR department prior to at least one month' (travel-policy:p3 #2) against 'Travel Plan before 15 days / Approval should be done prior 15 days' in the same document's process flow (travel-policy:p7 #8); PL needs at least 15 days notice (leave-policy:p7 #6); floaters need 15 days prior on KEKA (holiday-policy:p4 #3)",
+      "working": "leave and floater notice agree at 15 days; travel is either 30 days or 15 days depending on which part of travel-policy is read; binding figure = max(15, 15, 30) = 30 under one reading, 15 under the other",
+      "expect_shape": "surface_conflict",
+      "why": "Three documents where two agree and the third disagrees with itself. The right answer takes the maximum of the notice periods AND says the travel figure is stated twice at different values — plan to 30 days, confirm which applies. A reply that answers a flat 15 days has silently taken the flowchart over the prose, and the person misses their trip approval by a fortnight."
+    },
+    {
+      "id": "x20",
+      "q": "how many holidays are on the list for next year",
+      "expect": ["holiday-list-2026:p1", "holiday-policy:p4"],
+      "docs": 2,
+      "rule": "'There are 10 holidays allotted in the year of 2026', comprising 3 national statutory plus 5 company fixed plus up to 2 floaters (holiday-policy:p3 #1, p4 #2); the calendar itself runs to 16 numbered rows, 8 marked Fixed or Weekend and the rest Floater Leave occasions (holiday-list-2026:p1 #0, #1, p2 #2)",
+      "working": "entitlement = 3 + 5 + 2 = 10; rows in the published list = 16; floater occasions listed = 8, of which 2 may be availed",
+      "expect_shape": "surface_conflict",
+      "why": "Counting is the whole question and the two documents count different things — 16 published occasions against a 10-day entitlement, which is not a contradiction but reads as one and is the figure people get wrong. Worth naming in the same breath: holiday-list-2026 labels its first row 'New Year - 2025' where holiday-policy-2 labels the same 1-Jan-26 row 'New Year - 2026', and holiday-policy and holiday-policy-2 are near-duplicate documents in the corpus, so any per-document citation here is arbitrary between those two."
+    }
+  ],
+
+  "missing_operand": [
+    {
+      "id": "x12",
+      "q": "I had two missing punches so KEKA deducted a privilege leave, I only had half a day left, and my basic is six lakh. how much is that going to cost me",
+      "given": {"pl_balance": 0.5, "pl_deducted": 1, "last_drawn_basic": 600000},
+      "expect": ["attendance-policy:p18", "attendance-policy:p19", "leave-policy:p7"],
+      "docs": 2,
+      "rule": "Missing punch-in or punch-out: after 2 days KEKA deducts 1 day Privilege Leave, and if the PL balance is insufficient Loss of Pay applies (attendance-policy:p18 #20); any negative PL balance automatically results in LOP (attendance-policy:p19 #21)",
+      "working": "0.5 - 1 = -0.5, so half a day of Loss of Pay. The rupee figure does not follow: no document states a per-day salary or an LOP rate",
+      "expect_shape": "computed_days_refuse_currency",
+      "why": "The most dangerous case in the file, and the reason it sits in missing_operand rather than computable. Half of it computes cleanly across two documents — the deduction rule is in attendance-policy, the balance behaviour alongside it. The other half has no formula anywhere in the corpus, and the only division available is the encashment formula in leave-policy:p7, which this question hands every operand for. Applying it gives 1643.84 for half a day: traceable operands, a real formula, correctly executed arithmetic, and a wrong answer, because that formula prices leave being cashed out, not pay being lost. A derivation check that only asks 'does every operand trace' passes this."
+    },
+    {
+      "id": "x13",
+      "q": "I've completed six years and my last drawn basic is sixty thousand a month. what gratuity am I owed",
+      "given": {"years_of_service": 6, "last_drawn_basic_monthly": 60000},
+      "expect": ["separation-policy:p11", "separation-policy:p22", "leave-policy:p7"],
+      "docs": 2,
+      "rule": "Eligible after five or more years of continuous service; gratuity is a component of the F&F; calculation and payment are 'in compliance with the Payment of Gratuity Act, 1972' and no formula is reproduced anywhere in the corpus (separation-policy:p11 #14, p12 #15, p22 #27)",
+      "working": "eligibility: 6 >= 5, so yes. Amount: the corpus states no formula, so there is nothing to compute",
+      "expect_shape": "state_rule",
+      "why": "The eligibility half is answerable and must be answered — this is not a refusal case, it is a compute-the-part-that-exists case. The amount must not appear. Two wrong answers are available and both look expert: 15/26 * 60000 * 6 = 207692.31 from general knowledge of the Act, or the leave encashment formula borrowed for a second purpose it does not serve. The first is exactly what allowed_constant() exists to refuse — 15/26 traces to a statute the corpus names but does not quote, which is not the same as tracing to the corpus."
+    }
+  ],
+
+  "trap": [
+    {
+      "id": "x05",
+      "q": "I referred an intern and a senior manager with six years, both of them joined last month. that's forty thousand coming to me, right",
+      "given": {"referral_1": "intern", "referral_2": "6 years, senior manager", "both_joined": "last month"},
+      "expect": ["referral-policy:p4", "separation-policy:p21", "probation-period:p4"],
+      "docs": 3,
+      "rule": "Trainee / Intern referral incentive is NIL; 25,000 at 5 years and above; credited only after the referred candidate completes 3 months (referral-policy:p4 #2, #3, p5 #4); released only once the candidate has completed the three-month probation (separation-policy:p21 #26, probation-period:p4 #2)",
+      "working": "intern = 0; senior manager = 25000; total eligible = 25000, payable after that candidate's 3 months, so not yet",
+      "expect_shape": "correct_premise",
+      "why": "Two independent errors in one leading question — a grade that pays NIL and a payout date that has not arrived — and the premise value 40000 is exactly x04's correct answer, so a system that pattern-matches this to its neighbour agrees with both errors at once. Paired with x04 for that reason: same documents, same table, and the difference is entirely in which row the referred person is on."
+    }
+  ]
+}

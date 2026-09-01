@@ -1,0 +1,79 @@
+
+# COMPUTABLE — the figure follows, and the operands span more than one document
+# ---------------------------------------------------------------------------
+
+leave-policy p3 + holiday-policy p3
+1. how many paid days off do I actually get in a year, counting my leaves and the company holidays together
+
+holiday-list-2026 p1 + holiday-policy p4
+2. how many of next year's company holidays actually fall on a working day
+
+leave-policy p7 + holiday-list-2026 p1
+3. if I take leave from Monday the nineteenth of October to Friday the twenty third, how many privilege leaves come out of my balance
+
+referral-policy p4 + probation-period p4 + separation-policy p21
+4. I referred two people and they both joined on the first of February, one senior developer with eight years and one engineer with three years. how much do I get and when does it land
+
+assets-policy p7 + p8 + separation-policy p11
+5. I'm resigning. my laptop repair was eleven thousand five hundred and it wasn't under warranty, and the courier to Jaipur is quoting two thousand one hundred. what do I end up out of pocket
+
+assets-policy p13 + probation-period p4
+6. I joined on the fifteenth of March and I want a second monitor. when am I eligible, and when would it be mine to keep
+
+probation-period p4/p6 + separation-policy p5 + p10
+7. I joined on the first of March and I want to resign on the first of May. how long is my notice and which salaries get held
+
+leave-policy p11 + p7 + separation-policy p13
+8. my opening privilege leave balance in January was sixteen, I got my twelve for the year and I've taken one. what gets encashed in December
+
+travel-policy p6 + annual-event-policy p4
+9. I'm on a four day business trip to Gurgaon and I'm driving my own car. what can I claim
+
+annual-event-policy p2 + prevention-of-sexual-harassment-policy p6
+10. something happened to me at the annual event on the twenty sixth of February. who do I report it to and how long do I have
+
+leave-policy p15 + p17 + probation-period p4
+11. I'm still on probation and I'm pregnant. how many days can I take in total
+
+performance-management p10 + leave-policy p7
+12. I've been put on a ninety day performance improvement plan. do I still get my leaves for those months
+
+# ---------------------------------------------------------------------------
+# UNDERSPECIFIED — "working days" is never defined; the assumption must be said
+# ---------------------------------------------------------------------------
+
+separation-policy p10 + holiday-list-2026 p1
+13. my last working day is the eighteenth of August. by when should my full and final be settled
+
+assets-policy p3 + holiday-list-2026 p1
+14. I'm joining from home on the second of March. when should my laptop turn up
+
+# ---------------------------------------------------------------------------
+# CONFLICT — two places give different numbers; surfacing that is the answer
+# ---------------------------------------------------------------------------
+
+leave-policy p7 (12) vs p11 table (24)
+15. the policy says carry forward is capped at twelve days, so out of twenty seven I should be carrying twelve and encashing fifteen, correct
+
+travel-policy p3 vs p7 + leave-policy p7 + holiday-policy p4
+16. I want to take two floaters and three privilege leaves either side of a business trip. how far ahead do I need to get all of this approved
+
+holiday-list-2026 p1 + holiday-policy p4
+17. how many holidays are on the list for next year
+
+# ---------------------------------------------------------------------------
+# MISSING OPERAND — the days compute, the rupees do not
+# ---------------------------------------------------------------------------
+
+attendance-policy p18 + p19 + leave-policy p7
+18. I had two missing punches so KEKA deducted a privilege leave, I only had half a day left, and my basic is six lakh. how much is that going to cost me
+
+separation-policy p11 + p22 + leave-policy p7
+19. I've completed six years and my last drawn basic is sixty thousand a month. what gratuity am I owed
+
+# ---------------------------------------------------------------------------
+# TRAP — the premise is wrong twice over
+# ---------------------------------------------------------------------------
+
+referral-policy p4 + separation-policy p21 + probation-period p4
+20. I referred an intern and a senior manager with six years, both of them joined last month. that's forty thousand coming to me, right

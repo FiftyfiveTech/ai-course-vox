@@ -1,0 +1,108 @@
+{
+  "_note": [
+    "VOX-034 part A. Follow-up / cross-question cases: does a turn understand a question that",
+    "refers to an earlier one? Scored by tests/gates/gate_followup.py as correct-source@3 on the",
+    "FOLLOW-UP turn, run twice — history off, then history on. The criterion is the 'on' column",
+    "beating the 'off' column, plus an absolute floor. The A/B is what makes this a measurement",
+    "rather than an assertion: a single column would only say that follow-ups sometimes work.",
+    "",
+    "WRITTEN BEFORE THE IMPLEMENTATION, and committed in its own commit. CLAUDE.md seals",
+    "evals/heldout/ for the Evaluator so that whoever tunes cannot see the target. Both sides of",
+    "VOX-034 are being written by the same agent, so that protection does not exist here. Cases",
+    "first is the cheap substitute — the implementation is fitted to cases that already existed,",
+    "and git log shows which came first. Nothing here bounds how much the implementation was",
+    "shaped by these cases; that limit is printed next to the numbers, not left in a design doc.",
+    "",
+    "Dev only. evals/heldout/ is sealed as heldout-v1 and holds zero document queries; it is not",
+    "reopened for this.",
+    "",
+    "Every 'expect' label was read off the actual chunk in runs/chunks.jsonl before it was written",
+    "here, per the rule pdf_queries.json set. 215 chunks over 15 documents.",
+    "",
+    "Three groups, and the last two are the ones that keep the first honest:",
+    "  referential      — the follow-up cannot be resolved without the first question",
+    "  self_sufficient  — the follow-up stands alone; it must score correct with history OFF *and*",
+    "                     ON. A regression here means the rewrite is firing when it should not.",
+    "  absent_followup  — the follow-up asks something the corpus does not cover. It must still",
+    "                     refuse. History must not manufacture a link to whatever was discussed."
+  ],
+
+  "referential": [
+    {
+      "id": "f01",
+      "first": "how many days of paternity leave am I entitled to",
+      "followup": "how far in advance do I have to plan it",
+      "expect": ["leave-policy:p12"],
+      "why": "The hardest case in the set and the reason it is first. Alone, the follow-up tokenizes to roughly [far, advance, plan] and the 30-calendar-days-advance clause appears in FIVE near-identical chunks — leave-policy p12 (paternity), p14, p16 (maternity), p18 and p19 — so without the antecedent there is no way to prefer the right one. 'it' is the only thing that disambiguates."
+    },
+    {
+      "id": "f02",
+      "first": "how many privilege leaves can I accumulate",
+      "followup": "what happens to the extra ones",
+      "expect": ["leave-policy:p7"],
+      "why": "'the extra ones' carries no content term at all — after stopword removal the query is close to empty, which is the floor-miss case turn_reply already handles by dropping to the plain path. The answer is the Surplus clause in the same chunk (#6) as the 24-day cap the first question asked about."
+    },
+    {
+      "id": "f03",
+      "first": "how is my leave encashment calculated",
+      "followup": "when is it paid out",
+      "expect": ["leave-policy:p7"],
+      "why": "'The encashment is processed in the financial year, i.e. March month' is chunk #6; the formula is #7. Both are p7, so one label covers it. 'paid out' shares no term with 'processed', which is the lexical half failing and the dense half being the reason the pair is retrievable at all."
+    },
+    {
+      "id": "f04",
+      "first": "can I take casual leave during my notice period",
+      "followup": "what about during a performance improvement plan",
+      "expect": ["leave-policy:p5"],
+      "why": "Both prohibitions are in one sentence of chunk #4: 'Casual Leave cannot be applied when in the notice period and during the performance improvement plan.' The follow-up is answerable from the same chunk the first question already retrieved, so a history mechanism that merely re-ranks should get this even if rewriting fails."
+    },
+    {
+      "id": "f05",
+      "first": "how many casual leaves do I get in a year",
+      "followup": "and privilege leaves",
+      "expect": ["leave-policy:p10"],
+      "why": "The worked examples sit side by side on p10 — CASE I for casual, CASE II for privilege — so the label is the same page for both halves. 'and privilege leaves' is two content words and matches many chunks; the elliptical 'and' is what has to be resolved."
+    },
+    {
+      "id": "f06",
+      "first": "what is the notice period when I resign",
+      "followup": "and if I am still on probation",
+      "expect": ["probation-period:p6"],
+      "why": "Two different answers — 30 days for confirmed employees (separation-policy:p17) versus two months during probation (probation-period:p6 #4), so a turn that ignores the follow-up and repeats the first answer is wrong rather than merely unhelpful. Stated honestly: 'probation' is a high-IDF term and may clear the floor unaided, which makes this the EASY end of the referential range. It is in the set for the answer contrast, not for retrieval difficulty."
+    }
+  ],
+
+  "self_sufficient": [
+    {
+      "id": "f07",
+      "first": "how many days of paternity leave am I entitled to",
+      "followup": "what is the notice period when I resign",
+      "expect": ["separation-policy:p17"],
+      "why": "Control. The second question is unrelated and complete on its own, so it must score correct with history OFF and ON alike. If adding history regresses this, the rewrite is contaminating queries that needed nothing — the failure mode that would otherwise hide inside an improved average."
+    },
+    {
+      "id": "f08",
+      "first": "what happens to my privilege leave balance when I resign",
+      "followup": "how many floating holidays do I get in a year",
+      "expect": ["holiday-list-2026:p2", "holiday-policy:p4", "holiday-policy-2:p4"],
+      "why": "Second control, and a topic change rather than a topic shift. Three labels because the entitlement really is printed in three places: 'You are entitled to avail 2 floating holidays in a year' (holiday-list-2026:p2 #2) and 'Employees may avail up to two (2) floater leaves per calendar year' (holiday-policy:p4 #2 and holiday-policy-2:p4 #2, which are near-duplicate documents). Written as p3 first and corrected after reading the chunks: p3 is the applicability/purpose section in both policies and states no entitlement. Label error is the one failure mode that fails a gate for nothing."
+    }
+  ],
+
+  "absent_followup": [
+    {
+      "id": "f09",
+      "first": "how many privilege leaves can I accumulate",
+      "followup": "and can I trade them in for a sabbatical",
+      "expect": [],
+      "why": "Negative control. 'sabbatical' appears nowhere in the corpus (checked against runs/chunks.jsonl). The first question is answerable and on-topic, so a history mechanism has every excuse to keep answering from leave-policy chunks about accumulation and encashment. It must refuse instead. This is the case where history makes things WORSE if it is wrong."
+    },
+    {
+      "id": "f10",
+      "first": "how is my leave encashment calculated",
+      "followup": "and is a gym membership reimbursed",
+      "expect": [],
+      "why": "Second negative control, HR-shaped and sharing corpus vocabulary ('reimbursed' appears in the corpus) per the rule retrieval_floor_queries.json set for absent queries. 'gym' does not appear. A miss written in unrelated words would clear any floor and prove nothing."
+    }
+  ]
+}

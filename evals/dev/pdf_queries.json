@@ -1,0 +1,109 @@
+{
+  "_note": [
+    "VOX-033 gate set. Ten queries: 8 answerable with an expected source file:page, 2 deliberately",
+    "absent from the corpus. Scored by tests/gates/gate_poc_pdf.py — correct-source@3 over the 8,",
+    "refusal rate over the 2. Run with: make gate-poc",
+    "",
+    "Dev only. evals/heldout/ is sealed as heldout-v1 and holds zero document queries (its",
+    "categories are greet / entity / ambig / escalate / refuse); it is not reopened for this. So",
+    "every number scored off this file was computed on queries the Builder can read, and nothing",
+    "here bounds how much the implementation was shaped by these ten cases. The gate prints that",
+    "limit next to the numbers rather than leaving it in a design doc.",
+    "",
+    "NOT the floor-calibration set. That is retrieval_floor_queries.json, and none of its 7 hits or",
+    "6 misses appear here — those thirteen are what RETRIEVAL_SCORE_FLOOR = 0.28 was fitted to, and",
+    "a gate scored on them measures how well the floor was fitted, which is a number that can only",
+    "go up and cannot be wrong.",
+    "",
+    "expect is a list because two of these answers really are printed in more than one place: the PL",
+    "encashment rule is stated verbatim on separation-policy p13 and again on p26. It is a list for",
+    "that reason only, never to widen a label until retrieval clears it.",
+    "",
+    "Every expect label was read off the actual chunk in runs/chunks.jsonl before it was written",
+    "here, and two candidate queries were cut for failing that check rather than relabelled: 'can I",
+    "accept a gift from a vendor' (retrieval missed it, but 'gift' appears in 5 chunks — the corpus",
+    "does cover it, so it is not an absent query) and 'who pays for my hotel stay on official",
+    "travel' (travel-policy has no accommodation section; 'hotel' appears only incidentally, so it",
+    "is not an answerable one). retrieval_floor_queries.json records two labels that were written",
+    "wrong first for the same reason. Label error is the one failure mode that fails this gate for",
+    "nothing.",
+    "",
+    "q03 is expected to miss, and it is in the set on purpose. It is the STT-damaged form of q02 —",
+    "ARCHITECTURE.md records the live turn where 'leave encashment' came back from Whisper as",
+    "'leaving cashment', destroying the one high-information term before retrieval ran. Retrieval",
+    "returns leave-policy p7/p10 (leave accrual arithmetic) instead of the separation-policy pages",
+    "that hold the rule. The floor of 7/8 is set to allow exactly this one: seven clean queries pass",
+    "and the known-damaged one does not. A regression on any clean query drops it to 6/8 and fails.",
+    "",
+    "The two absent queries take the two different refusal paths on purpose, because src/answer.py",
+    "distinguishes them and only one of them involves a model at all: q09 clears the floor (it",
+    "retrieves leave-policy chunks about other leave types) and must be refused by the model from",
+    "excerpts that do not contain the answer; q10 is rejected by the floor, so it is refused with no",
+    "model call. Both are HR-shaped and share corpus vocabulary — 'leave', 'days', 'company',",
+    "'employee', 'coverage' — because a miss written in unrelated words would clear any floor and",
+    "prove nothing. Neither subject appears anywhere in the corpus: grep -ic over runs/chunks.jsonl",
+    "returns 0 for 'menstrual' and 0 for 'health insurance|mediclaim|medical insurance'."
+  ],
+  "answerable": [
+    {
+      "id": "q01",
+      "q": "how many paternity leaves am I entitled to according to policy",
+      "expect": ["leave-policy:p12"],
+      "why": "ARCHITECTURE.md's worked paternity case. The entitlement is on p12; p14 carries only the terms and conditions, so the label stays narrow."
+    },
+    {
+      "id": "q02",
+      "q": "how is my privilege leave encashment calculated when I leave the company",
+      "expect": ["separation-policy:p13", "separation-policy:p26"],
+      "why": "The rule lives in separation-policy, not leave-policy — the trap this set exists to catch. Stated verbatim on both pages, hence two labels. Answers by stating the formula, which is what answer_from_source_v2.md asks for instead of computing it."
+    },
+    {
+      "id": "q03",
+      "q": "how much my leaving cashment would be",
+      "expect": ["separation-policy:p13", "separation-policy:p26"],
+      "why": "q02 as Whisper actually transcribed it in a live turn. Expected to miss: retrieval returns leave-policy p7/p10. This is the one query the 7/8 floor allows to fail, and it is a measurement of STT damage, not of retrieval."
+    },
+    {
+      "id": "q04",
+      "q": "what are the standard office working hours and shift timings",
+      "expect": ["attendance-policy:p4"],
+      "why": "The answer is nothing but figures — 8 hours, 10:00 AM to 7:00 PM, 40 weekly hours — so it exercises answer.ungrounded_numbers() on a reply that must be allowed to say numbers."
+    },
+    {
+      "id": "q05",
+      "q": "how many maternity leaves does a woman employee get",
+      "expect": ["leave-policy:p15"],
+      "why": "A clean single-page answer in the largest document. The control: if this one fails, the index itself is wrong."
+    },
+    {
+      "id": "q06",
+      "q": "what is the dress code in the office",
+      "expect": ["code-of-ethics-business-conduct:p13"],
+      "why": "Retrieval ranks the right page third — p12 (Remote Work Etiquette) and annual-event-policy p3 outrank it. The query that justifies measuring @3 rather than @1."
+    },
+    {
+      "id": "q07",
+      "q": "what happens to my laptop if I resign before two years of allotment",
+      "expect": ["assets-policy:p14"],
+      "why": "A conditional answer rather than a lookup — the condition (before 2 years) changes the outcome, so a reply that ignores it is wrong while still citing the right page."
+    },
+    {
+      "id": "q08",
+      "q": "how often does the performance appraisal cycle happen",
+      "expect": ["performance-management:p6"],
+      "why": "A seventh document in the set, and the answer is a duration rather than a count."
+    }
+  ],
+  "absent": [
+    {
+      "id": "q09",
+      "q": "how many days of paid menstrual leave does the company give",
+      "why": "Clears the floor on leave-policy chunks about casual, privilege and leave-without-pay, none of which mention it. The model has to refuse from excerpts that look relevant — the refusal path that costs a free-tier call and is the one that can fabricate."
+    },
+    {
+      "id": "q10",
+      "q": "what is the health insurance coverage amount for my family",
+      "why": "Rejected by the floor: best unfloored score 0.159 on leave-policy p25 (compensation during leave without pay). Refused with no model call at all, so it tests RETRIEVAL_SCORE_FLOOR rather than the prompt."
+    }
+  ]
+}

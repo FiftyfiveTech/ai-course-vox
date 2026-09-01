@@ -39,6 +39,35 @@ Every model and dataset is named by its **HF repo id** (`openai/whisper-large-v3
 via `ollama pull hf.co/<repo>`. **Zero spend**: any paid call is a STOP-and-ask, not a judgement
 call. Gemini and `groq/compound*` are out — no HF repo id.
 
+## Learning loop and the web coach
+
+Every ticket doubles as course material, and the artifacts are developer-agnostic on purpose —
+clone the repo, run one command, the session works on anyone's machine.
+
+- **Ticket start:** write `docs/learning/vox-<nnn>-concepts.md` before implementation — the
+  concepts the ticket exercises, why each matters here, the pitfall. Then offer a coach
+  session on it. Skippable, never silent.
+- **The coach** is a static lesson page plus a stdlib server: `make coach`, open
+  `http://127.0.0.1:8765/vox-day1.html`, then say **"start web coach session"** in Claude
+  Code. The page bundles the quiz into one submission, Claude grades it and replies into the
+  page's chat panel. Protocol: `.claude/skills/web-coach/SKILL.md`.
+- **NotebookLM** hosts a shared notebook over the same tracked docs — plain-English Q&A with
+  citations, and the short Video Overviews the coach pages embed. Sync with
+  `uv run --script tools/coach/notebooklm_sync.py`; the notebook id comes from
+  `--notebook`/`$VOX_NOTEBOOK_ID`, never hardcoded. Only tracked docs are uploaded —
+  recordings, `runs/` and `evals/heldout/` must never become a notebook source.
+- **Ticket close:** append to `docs/learning/retros.md` — executed, deviations + why, numbers
+  with the command that produced them, lessons.
+
+Setup, source hygiene and the video index: `docs/learning/README.md`.
+
+## Pull requests
+
+Full procedure — branch naming, the PR body template, the review checklist, merge commands
+and how to recover from the usual mistakes — is `docs/CONTRIBUTING.md`. The short version:
+branch off `dev`, PR against `dev`, the **other** developer reviews and presses merge
+(`gh pr merge <n> --merge --delete-branch`). Nothing is committed straight to `dev` or `main`.
+
 ## Conventions
 
 - `uv` for the env. `make setup` and `make demo` must work from a clean clone.

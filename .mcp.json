@@ -1,9 +1,14 @@
 {
   "mcpServers": {
     "odoo-board": {
-      "command": "python3",
-      "args": ["${AI_COURSE_KIT}/odoo_board_mcp.py"],
-      "env": {}
+      "command": "python",
+      "args": ["${CLAUDE_PROJECT_DIR:-.}/tools/board_mcp/odoo_board_mcp.py"],
+      "env": {
+        "ODOO_URL": "https://odoo.fiftyfivetech.io",
+        "ODOO_DB": "odoo-db",
+        "ODOO_PROJECT_ID": "60",
+        "ODOO_DONE_STAGE_ID": "1880"
+      }
     }
   }
 }
