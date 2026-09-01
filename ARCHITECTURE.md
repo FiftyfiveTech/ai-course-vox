@@ -35,7 +35,7 @@ confirmation from the user.
 │       ↓                                                             │
 │  [STT]  whisper-large-v3-turbo (Groq free tier)      REMOTE         │
 │       ↓                            └─ on failure ──> faster-whisper-base   LOCAL
-│  [NLU / entity extraction]  LLM (NVIDIA NIM)         REMOTE         │
+│  [NLU / entity extraction]  gpt-oss-120b (Groq free tier)  REMOTE   │
 │       structured output validated against schemas/                  │
 │       ↓                            └─ on failure ──> Llama-3.2-3B (ollama) LOCAL
 │  [Confirmation check]  — required for every write action            │
@@ -352,13 +352,20 @@ lives only in `src/config.py`.
 | STT | `openai/whisper-large-v3` | Groq free tier | `openai-audio` | `large-v3` |
 | STT | `openai/whisper-base` | local | `transformers-whisper` | `whisper-base` |
 | STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` **(fallback)** |
-| LLM | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-8b` **(default)** |
-| LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` |
-| LLM | `meta-llama/Llama-3.1-70B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-70b` |
+| LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` **(default)** |
+| LLM | `openai/gpt-oss-120b` | NVIDIA NIM free tier | `openai-chat` | `gpt-oss-nim` |
+| LLM | `Qwen/Qwen3.8-27B` | Groq free tier | `openai-chat` | `qwen3.8` |
+| LLM | `openai/gpt-oss-20b` | Groq free tier | `openai-chat` | `gpt-oss-20b` |
 | LLM | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` | local, via ollama | `ollama-chat` | `llama-3.2-3b` **(fallback)** |
 | TTS | `hexgrad/Kokoro-82M` | local | `kokoro` | `kokoro` **(default)** |
 | TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` **(fallback)** |
 | TTS | `rhasspy/piper-voices` | local | `piper` | `piper` |
+
+The two `meta-llama/Llama-3.1-*-Instruct` arms that used to head this stage are gone: NVIDIA NIM
+retired both on **2026-08-26** and now answers `410 Gone` with that date in the body. Latency tables
+elsewhere in this file that name them were measured before that and are kept as the record of what
+was measured, not as a claim about arms you can still call. `make preflight` is what checks this
+table against the two catalogues — run it before a demo, not after one fails.
 
 `ollama` is a provider name of its own rather than `local` because the arm runs on this machine and
 still speaks HTTP, to a daemon on `localhost:11434`. `Arm.local` is the attribute that answers "are
@@ -1052,6 +1059,14 @@ extra ceremony; the cost of not doing it is this paragraph.
    **VOX-013 has now measured it end to end and it is still not a candidate:** 1.7 s / 3.8 s / 15.4 s
    across three turns, and the 15.4 s one exceeds `REMOTE_TIMEOUT_S` (10 s), so a third of turns would
    fall back on the shipped configuration. `Llama-3.1-8B` stays the default.
+   **2026-09-01 — the settled answer expired.** NIM retired both `meta-llama/Llama-3.1-8B-Instruct`
+   and `-70B-Instruct` on 2026-08-26 (`410 Gone`, end-of-life date in the body), so every number in
+   this item describes arms nobody can call. The question is re-answered by measurement, not by
+   re-opening the debate: `openai/gpt-oss-120b` @ groq is the default at 312–555 ms, the same repo id
+   @ nvidia-nim is the cross-provider arm at 1766/5801 ms, and the size contrast this item wanted is
+   now `openai/gpt-oss-20b` (302–408 ms) — a sixth of the parameters and no faster, which is itself
+   the answer. `Qwen/Qwen3.8-27B` @ groq is the fastest arm on either tier at 259/272 ms.
+   Commands: `uv run python scripts/preflight.py --call`, then `make arms`.
 2. ~~TTS: local `espnet` or NIM?~~ **Settled by the VOX-002 ticket:** `hexgrad/Kokoro-82M`,
    local. (This doc originally proposed `espnet/kan-bayashi_ljspeech_vits`; the ticket names
    Kokoro, so the ticket wins.)

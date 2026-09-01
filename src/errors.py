@@ -49,20 +49,48 @@ class ProviderError(RuntimeError):
         self.arm_id = arm_id
 
 
+class ModelGone(RuntimeError):
+    """A provider said 404 or 410 for the model itself: this arm no longer exists there.
+
+    Added 2026-09-01, after NIM retired `meta-llama/Llama-3.1-8B-Instruct` on 2026-08-26 and the
+    demo died mid-turn on a 410 whose body said exactly that. The 4xx rule below is right about a
+    bad key and a malformed body — routing around those hides a bug — but a retired model is a
+    third thing, and it fails the *other* way: the request is correct, the credential is fine, and
+    the only fix is a table edit nobody can make while the mic is open.
+
+    So this one is transient. The session degrades to the local arm, loudly — `_run_fallback`
+    prints the banner and calls.jsonl carries `status_code` and `fallback_for` — and the staleness
+    is caught before the next session by `scripts/preflight.py`, which asks each provider's
+    catalogue what it still serves. Falling back is not how you find out the arm is dead; it is how
+    the turn survives finding out.
+
+    404 and 410 are both here because providers do not agree: NIM answers 410 with an end-of-life
+    date for a retired model and 404 for one this account was never entitled to, and Groq answered
+    404 for `Llama-3.3-70B` when it was not on the key's catalogue. All three mean "not from me".
+    """
+
+    def __init__(self, message, *, status_code, arm_id):
+        super().__init__(message)
+        self.status_code = status_code
+        self.arm_id = arm_id
+
+
 def is_transient(exc):
     """-> True if another arm could plausibly survive `exc`. The whole fallback rule, in one place.
 
     Deliberately narrow. What is *not* here matters as much as what is:
 
-      httpx.HTTPStatusError   4xx — a bad key, a model not on the catalogue, a malformed body. The
-                              local arm would succeed and hide a bug that needs fixing, and a
+      httpx.HTTPStatusError   4xx — a bad key, a malformed body, a refused parameter. The local
+                              arm would succeed and hide a bug that needs fixing, and a
                               silently-degraded transcript is a worse outcome than a loud stop.
+                              404/410 used to be in this bucket and are now ModelGone above:
+                              same status class, opposite fix, so they get the opposite answer.
       RuntimeError            a missing credential or a provider off the free-tier list. That is a
                               STOP-and-ask under CLAUDE.md, not a runtime condition to route around.
       the empty-reply error   nlu.py raising because a reasoning arm spent its budget thinking. That
                               is a misconfigured arm, and it would raise again next turn.
     """
-    return isinstance(exc, (RateLimited, ProviderError,
+    return isinstance(exc, (RateLimited, ProviderError, ModelGone,
                             httpx.TimeoutException, httpx.TransportError))
 
 
@@ -79,6 +107,25 @@ def _retry_after_s(headers):
         return round(float(raw), 2)
     except (TypeError, ValueError):
         return None
+
+
+def _detail(r):
+    """-> the provider's own explanation, or its status line. Never raises: this runs on a failure.
+
+    Three shapes across two providers — NIM sends RFC 9457 `{"detail": ...}`, Groq sends OpenAI's
+    `{"error": {"message": ...}}`, and either can send HTML from a proxy — so the body is tried as
+    each and falls back to the raw text it actually is.
+    """
+    try:
+        body = r.json()
+    except Exception:
+        return (r.text or "").strip()[:200] or f"no body ({r.reason_phrase})"
+    if isinstance(body, dict):
+        for value in (body.get("detail"), (body.get("error") or {}).get("message")
+                      if isinstance(body.get("error"), dict) else body.get("error")):
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+    return str(body)[:200]
 
 
 def check(r, arm, rec):
@@ -99,5 +146,16 @@ def check(r, arm, rec):
             f"side, not the request — another arm can answer this turn.",
             status_code=r.status_code, arm_id=arm.id,
         )
-    # 4xx keeps the original behaviour exactly: one HTTPStatusError, no fallback, fix the request.
+    if r.status_code in (404, 410):
+        # The provider's own words are the useful part here — NIM's 410 body carries the end-of-life
+        # date, which is the one fact that says whether to wait or to edit config.py — so the body is
+        # quoted rather than summarised.
+        raise ModelGone(
+            f"{arm.provider} no longer serves {arm.provider_model} for {arm.id} "
+            f"({r.status_code}): {_detail(r)}. Re-point the arm in config.py — "
+            f"`uv run python scripts/preflight.py` lists what each provider still serves.",
+            status_code=r.status_code, arm_id=arm.id,
+        )
+    # Every other 4xx keeps the original behaviour exactly: one HTTPStatusError, no fallback, fix
+    # the request.
     r.raise_for_status()
