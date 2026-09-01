@@ -1,4 +1,4 @@
-.PHONY: setup fallback-model tokenizer encoder test gate demo dry-run barge turn ground arms compare index ask answer gate-poc gate-followup gate-figures gate-trick board coach clean
+.PHONY: setup fallback-model tokenizer encoder test gate preflight demo dry-run barge turn ground arms compare index ask answer gate-poc gate-followup gate-figures gate-trick board coach clean
 .DEFAULT_GOAL := help
 
 help:
@@ -6,6 +6,7 @@ help:
 	@echo "make test    unit tests"
 	@echo "make gate    NOTE: collects nothing — the gates expose main(), not test_*."
 	@echo "             Run them one by one; the commands are in README.md 'The gating table'"
+	@echo "make preflight ask each provider whether it still serves our arms (no tokens)"
 	@echo "make demo    talk to it end to end for VOX_SESSION_MINUTES (default 3; needs a mic)"
 	@echo "make dry-run the scripted 10-turn demo session, no mic — barge-in, confirmations, timings"
 	@echo "make barge   three turns with interruptible replies — talk over it (VOX-011)"
@@ -75,8 +76,17 @@ gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 
+# Are the arm table's claims about other people's catalogues still true? One GET /v1/models per
+# remote provider, no tokens, exits non-zero if any arm names a model its provider dropped. Run it
+# after a red demo before you debug anything else: on 2026-09-01 the answer was "NIM retired the
+# default LLM arm on 2026-08-26", which no amount of reading src/loop.py would have found.
+#
+#   uv run python scripts/preflight.py --call     also 1 token per arm: entitlement, not just listing
+preflight:
+	uv run python scripts/preflight.py
+
 # A conversation, not a turn: mic -> silero-vad -> whisper-large-v3-turbo -> retrieval ->
-# Llama-3.1-8B -> Kokoro-82M, and then round again until the session clock runs out. Every reply
+# gpt-oss-120b -> Kokoro-82M, and then round again until the session clock runs out. Every reply
 # plays with the mic still open, so you can talk over it (VOX-011) and a pause is just a pause — the
 # session ends on the clock, on Ctrl-C, or after a minute of silence, and prints what it completed.
 #
@@ -96,7 +106,7 @@ gate:
 # the answer and logged on the turn line (VOX-032) — so `make index` first, or startup says why
 # nothing will be grounded and every turn takes the plain reply path. `--no-kb` forces that older
 # path for a whole run:  uv run python -m src.loop --no-kb
-demo:
+demo: preflight
 	uv run python -m src.loop --minutes
 
 # VOX-026. The demo, rehearsed: the ten turns in evals/demo/session_v1.json driven end to end with
@@ -238,11 +248,11 @@ gate-trick:
 # prompts/answer_from_source_v1.md: answer only from these excerpts, or say you could not find it.
 # Prints the spoken answer, the doc:page it was grounded in, and the turn_id that joins this run to
 # its runs/calls.jsonl line. The one path in this script that makes a model call, so it needs a key
-# — NVIDIA_API_KEY for the default arm, and it falls back to the local ollama arm if the free tier
+# — GROQ_API_KEY for the default arm, and it falls back to the local ollama arm if the free tier
 # refuses. A query that clears no chunk is refused here with no call at all.
 #
 #   make answer Q="how many casual leaves am I entitled to in a year"
-#   LLM=gpt-oss make answer Q="..."      answer with a different arm
+#   LLM=qwen3.8 make answer Q="..."      answer with a different arm
 answer:
 	@test -n "$(Q)" || { echo 'usage: make answer Q="how many casual leaves do I get"'; exit 1; }
 	uv run python scripts/ask.py "$(Q)" --answer $(if $(LLM),--llm $(LLM),)

@@ -10,7 +10,7 @@ confirmation read-back before anything that would write.
 ```
 Mic → [VAD] silero → [STT] whisper-large-v3-turbo → [retrieval] BM25 + bge-small
                                                           ↓
-        Speaker ← [TTS] Kokoro-82M ← [LLM] Llama-3.1-8B ← grounded prompt, or plain reply
+        Speaker ← [TTS] Kokoro-82M ← [LLM] gpt-oss-120b ← grounded prompt, or plain reply
 ```
 
 Everything is a swappable **arm** named by its Hugging Face repo id, every model call is logged with
@@ -200,12 +200,12 @@ to change it.
 ```bash
 # --- credentials (no defaults; a MISSING one stops the turn, it does not fall back) ------------
 HF_TOKEN=                       # only for gated repos; the pinned tokenizer mirror needs none
-GROQ_API_KEY=                   # STT default + the gpt-oss LLM arm      https://console.groq.com
-NVIDIA_API_KEY=                 # LLM default (Llama-3.1-8B)             https://build.nvidia.com
+GROQ_API_KEY=                   # STT default + the LLM default and 2 more  https://console.groq.com
+NVIDIA_API_KEY=                 # the gpt-oss-nim arm only               https://build.nvidia.com
 
 # --- arm selection: alias, HF repo id, or repo/id@provider. A CLI flag beats the env ----------
 VOX_STT_MODEL=                  # default openai/whisper-large-v3-turbo     (alias: turbo)
-VOX_LLM_MODEL=                  # default meta-llama/Llama-3.1-8B-Instruct  (alias: llama-8b)
+VOX_LLM_MODEL=                  # default openai/gpt-oss-120b@groq          (alias: gpt-oss)
 VOX_TTS_MODEL=                  # default hexgrad/Kokoro-82M                (alias: kokoro)
 VOX_EMBED_MODEL=                # default BAAI/bge-small-en-v1.5            (alias: bge-small)
 
@@ -261,15 +261,22 @@ arm on an existing runtime is a table row and no new code.
 | STT | `openai/whisper-large-v3` | Groq free tier | `openai-audio` | `large-v3` |
 | STT | `openai/whisper-base` | local | `transformers-whisper` | `whisper-base` |
 | STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` **(fallback)** |
-| LLM | `meta-llama/Llama-3.1-8B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-8b` **(default)** |
-| LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` |
-| LLM | `meta-llama/Llama-3.1-70B-Instruct` | NVIDIA NIM free tier | `openai-chat` | `llama-70b` |
+| LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` **(default)** |
+| LLM | `openai/gpt-oss-120b` | NVIDIA NIM free tier | `openai-chat` | `gpt-oss-nim` |
+| LLM | `Qwen/Qwen3.8-27B` | Groq free tier | `openai-chat` | `qwen3.8` |
+| LLM | `openai/gpt-oss-20b` | Groq free tier | `openai-chat` | `gpt-oss-20b` |
 | LLM | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` | local, via ollama | `ollama-chat` | `llama-3.2-3b` **(fallback)** |
 | TTS | `hexgrad/Kokoro-82M` | local | `kokoro` | `kokoro` **(default)** |
 | TTS | `microsoft/speecht5_tts` | local | `speecht5` | `speecht5` **(fallback)** |
 | TTS | `rhasspy/piper-voices` | local | `piper` | `piper` |
 | Embed | `BAAI/bge-small-en-v1.5` | local | `transformers-embed` | `bge-small` **(default)** |
 | Embed | `sentence-transformers/all-MiniLM-L6-v2` | local | `transformers-embed` | `minilm` |
+
+The two `meta-llama/Llama-3.1-*-Instruct` arms that used to head this stage are gone: NVIDIA NIM
+retired both on **2026-08-26** and now answers `410 Gone` with that date in the body. Latency tables
+elsewhere in this file that name them were measured before that and are kept as the record of what
+was measured, not as a claim about arms you can still call. `make preflight` is what checks this
+table against the two catalogues — run it before a demo, not after one fails.
 
 `ollama` is a provider of its own rather than `local` because the weights are here and it still
 speaks HTTP, to a daemon on `localhost:11434`. `Arm.local` is the attribute that answers "are the
