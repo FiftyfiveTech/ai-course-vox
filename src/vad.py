@@ -144,8 +144,7 @@ class Endpointer:
                 self.done_t = now
                 return DONE
             # Too short to be a turn — a cough or a door. Rearm rather than transcribe it.
-            self._reset()
-            self.model.reset_states()
+            self.rearm()
             return TOO_SHORT
 
         if len(self.frames) * MS_PER_FRAME >= VAD_MAX_UTTERANCE_MS:
@@ -153,6 +152,17 @@ class Endpointer:
             return DONE
 
         return SPEAKING
+
+    def rearm(self):
+        """Drop the utterance in progress and start listening again from nothing.
+
+        Two callers, and they want the same thing for different reasons: `push` when a burst was too
+        short to be a turn, and `drive`'s reject hook when the burst was VOX hearing itself. Silero's
+        own state is reset with the buffer — it carries context between frames, and leaving that
+        behind makes the next utterance's first frames read as a continuation of the discarded one.
+        """
+        self._reset()
+        self.model.reset_states()
 
     def flush(self):
         """End the utterance at end-of-audio. -> DONE if enough speech was collected."""
@@ -177,7 +187,7 @@ class Endpointer:
 
 
 def drive(frames, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None, model=None,
-          max_wait_ms=None, echo=None):
+          max_wait_ms=None, echo=None, reject=None):
     """The endpointing decision over any source of frames. -> (Capture or None, state).
 
     `listen()` is this function over a microphone and `endpoint_frames()` is it over a recording,
@@ -208,9 +218,28 @@ def drive(frames, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None
         elif state == WAITING and max_wait_ms is not None and ep.waited_ms >= max_wait_ms:
             return None, WAITING
 
-        if on_speech is not None and not fired and ep.speech_ms >= confirm_ms:
+        if not fired and ep.speech_ms >= confirm_ms:
+            # `reject(segment) -> bool` is asked once per utterance, at the same instant barge-in
+            # would fire, and it is asked *first*. VOX-035's self-echo guard is the only caller: a
+            # capture it rejects must not cut the reply (so this runs before `on_speech`) and must
+            # not survive to be endpointed either (so the endpointer is rearmed rather than left to
+            # collect the rest of it). Rejecting without rearming would keep the reply playing and
+            # still hand the echo to the next turn as its input, which is the half of the bug that
+            # actually feeds itself.
+            #
+            # Here and not at DONE, which is where it was first written. A guard that compares mic
+            # audio against what the speaker has played needs both to mean the same instant, and at
+            # DONE they do not: `VAD_SILENCE_MS` of hangover has passed, the reply has played a
+            # further second, and the echo now sits further back in the reference than the delay
+            # search reaches. What reaches DONE anyway is caught after STT instead, by
+            # `echo.echoes_reply` — that layer needs no alignment at all.
+            if reject is not None and reject(ep.segment()):
+                say("  (that was VOX hearing itself through the mic — ignored)")
+                ep.rearm()
+                continue
             fired = True
-            on_speech(ep.first_speech_t)
+            if on_speech is not None:
+                on_speech(ep.first_speech_t)
 
     # The frames ran out. Live this is unreachable — a microphone does not end — so it is the
     # end-of-recording case, and `flush()` decides whether what was collected is a turn.
@@ -219,7 +248,7 @@ def drive(frames, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None
 
 
 def listen(max_wait_s=30, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, threshold=None,
-           announce=True):
+           announce=True, reject=None):
     """Block until the user speaks and stops. -> Capture, or None.
 
     Returns None if nothing was said within max_wait_s, so the caller can exit cleanly instead
@@ -251,7 +280,7 @@ def listen(max_wait_s=30, on_speech=None, confirm_ms=BARGE_MIN_SPEECH_MS, thresh
         if announce:
             print("listening… speak now.", flush=True)
         cap, _ = drive(mic_frames(stream), on_speech=on_speech, confirm_ms=confirm_ms,
-                       threshold=threshold, max_wait_ms=max_wait_s * 1000,
+                       threshold=threshold, max_wait_ms=max_wait_s * 1000, reject=reject,
                        echo=lambda line: print(line, flush=True))
 
     if cap is None:

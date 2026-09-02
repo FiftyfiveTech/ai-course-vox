@@ -45,8 +45,10 @@ import sys
 import time
 from collections import namedtuple
 
-from src import answer as answer_mod, arms, audio, confirm, state, vad
-from src.config import (BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE, HISTORY_ENABLED, RUNS_DIR,
+from src import answer as answer_mod, arms, audio, confirm, echo, state, vad
+from src.config import (BARGE_MIN_SPEECH_MS, BARGE_SPEECH_THRESHOLD, CONSENT_NOTICE,
+                        ECHO_CORR_THRESHOLD, ECHO_GUARD, ECHO_MAX_DELAY_MS,
+                        ECHO_TEXT_OVERLAP, ECHO_TEXT_TAIL_SLACK, HISTORY_ENABLED, RUNS_DIR,
                         SAMPLE_RATE, SESSION_MINUTES, SESSION_QUIET_LIMIT, utf8_console)
 from src.errors import RateLimited
 from src.history import History
@@ -81,7 +83,10 @@ def _save_history(history):
 # `pending` is the third fact one_turn has to hand back. A turn that was interrupted already holds
 # the next turn's audio, and returning it is what stops the loop from opening the mic to ask for
 # something it has been given. None means the next turn listens for itself, as every turn used to.
-TurnResult = namedtuple("TurnResult", "spoken keep_going pending")
+# `reply` is what was spoken, carried forward only so the *next* turn can recognise it coming
+# back through the mic (VOX-035). Defaulted, so the returns that predate it still read as they
+# did — a turn that never got as far as a reply has none to carry.
+TurnResult = namedtuple("TurnResult", "spoken keep_going pending reply", defaults=(None,))
 
 
 class Budget:
@@ -149,6 +154,59 @@ class Budget:
         return f"{total // 60}:{total % 60:02d}"
 
 
+def echo_reject(playback, ref_rate, turn=None):
+    """The predicate `vad.drive` asks before a capture is allowed to cut a reply (VOX-035).
+
+    -> a callable, or None when the guard is off — and None is the default, so a machine on
+    headphones runs the code path VOX-011 was measured on, untouched.
+
+    Closed over the `Playback` rather than over the samples: what has actually reached the speaker
+    by the time this is asked is `playback.pos`, and a reference window taken from anywhere else is
+    a guess at the alignment the correlation exists to find.
+
+    Counted on the turn record, not only printed. A run that quietly rejected nine captures and a
+    run with no echo at all look identical in the console once the reply has scrolled past, and the
+    difference between them is the whole question of whether the guard is doing anything.
+    """
+    if not ECHO_GUARD:
+        return None
+
+    def reject(segment):
+        # `finished` used to end the guard here, on the reasoning that nothing is going to the
+        # speaker afterwards but the device buffer's tail. The tail is the problem: 0.182 s of it on
+        # the demo machine's MME device, and every millisecond of it is audible echo that arrives
+        # *after* the guard had stopped looking. Reported from a real run as the guard working and
+        # then the last words of the reply coming back anyway.
+        #
+        # So the guard keeps running for the buffer plus one delay window, and the delay search is
+        # widened by however long ago the device stopped: the reference cannot advance past the end
+        # of the reply, so as the mic runs on, the echo sits further and further back inside it.
+        max_delay_ms = ECHO_MAX_DELAY_MS
+        if playback.finished.is_set():
+            since_end = time.perf_counter() - (playback.finished_t or time.perf_counter())
+            if since_end > playback.out_latency_s + ECHO_MAX_DELAY_MS / 1000:
+                return False              # the room really is quiet now; this is the user
+            max_delay_ms += since_end * 1000
+
+        wanted_s = len(segment) / SAMPLE_RATE + max_delay_ms / 1000
+        hit, r, delay_ms = echo.is_self_echo(segment, playback.reference(wanted_s),
+                                             SAMPLE_RATE, ref_rate, ECHO_CORR_THRESHOLD,
+                                             max_delay_ms)
+        if turn is not None:
+            # Recorded on every asking and not only on a hit. This is how the threshold gets tuned
+            # on a machine that actually has the problem: run with VOX_ECHO_CORR high enough that
+            # nothing ever fires, let a turn run away, and read what the echo actually scored out of
+            # runs/turns.jsonl. A field written only when the guard fires can never tell you that.
+            turn.extra["self_echo_checks"] = turn.extra.get("self_echo_checks", 0) + 1
+            turn.extra["self_echo_r"] = max(r, turn.extra.get("self_echo_r", 0.0))
+            turn.extra["self_echo_delay_ms"] = delay_ms
+            if hit:
+                turn.extra["self_echo"] = turn.extra.get("self_echo", 0) + 1
+        return hit
+
+    return reject
+
+
 def speak_and_watch(turn, speech, listen=None):
     """Play the reply with the mic open, and stop it if the user talks over it (VOX-011).
 
@@ -194,8 +252,19 @@ def speak_and_watch(turn, speech, listen=None):
         # the utterance carried into the next turn is endpointed slightly more conservatively than a
         # turn that began in silence. That is the price of one listener instead of two, and it is
         # visible: the next turn's record says its input was carried in.
+        # With the guard on, the barge-in decision waits for `echo.MIN_DECISION_MS` of speech
+        # instead of `BARGE_MIN_SPEECH_MS`. That is not tuning, it is the ordering: cutting the
+        # reply at 200 ms stops the echo, and the guard is then handed 400 ms of it and asked a
+        # question the measurement says cannot be answered on 400 ms. Stop latency on a guarded run
+        # is that much worse, and `echo_guard` on the turn record is what stops those numbers being
+        # averaged in with the runs VOX-011 was measured on.
+        confirm_ms = (max(BARGE_MIN_SPEECH_MS, echo.MIN_DECISION_MS) if ECHO_GUARD
+                      else BARGE_MIN_SPEECH_MS)
+        if ECHO_GUARD:
+            turn.extra["echo_guard"] = True
         cap = (listen or vad.listen)(on_speech=on_speech, threshold=BARGE_SPEECH_THRESHOLD,
-                                     announce=False)
+                                     announce=False, confirm_ms=confirm_ms,
+                                     reject=echo_reject(playback, speech.sample_rate, turn))
     finally:
         playback.close()
 
@@ -269,7 +338,7 @@ def confirmation_leg(turn, turn_id, chosen, turn_state, listen=None, play=True, 
     return response
 
 
-def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
+def one_turn(chosen, pending=None, watch=False, idx=None, history=None, last_reply=None):
     """-> TurnResult(spoken, keep_going, pending). `chosen` maps stage -> Arm.
 
     Three separate facts, because one bool used to carry the first two and they came apart at the TTS
@@ -318,6 +387,35 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
             transcript = arms.stt(cap.segment, chosen["stt"].id, turn_id=turn_id,
                                   on_fallback=turn.fallback)
         print(f"you said : {transcript!r}")
+
+        # VOX-035's second layer. The envelope guard in `echo_reject` runs before a reply is cut and
+        # can miss — a capture too short to correlate, or a machine whose delay is past
+        # ECHO_MAX_DELAY_MS. What it misses arrives here: a transcript that is a fragment of the
+        # reply just spoken, on a turn that never opened the mic. Dropping it is what stops the loop
+        # answering itself even when detection failed, and it is checked only on carried-in audio
+        # because that is the only input that can be an echo — a turn that opened its own mic is
+        # listening after the speaker went quiet.
+        # `classify_response` and not a word list of this function's own: a carried-in capture can
+        # be a real "yes, go ahead" said over the read-back, and the tail rule below is loose enough
+        # to reach one. VOX-020's gate owns what counts as an answer, and losing one to this guard
+        # would be a confirmed action silently not happening.
+        #
+        # Only for a short transcript, though, and that bound is load-bearing rather than tidy:
+        # `classify_response` matches its words as substrings, so "booking one hour with Priya"
+        # contains "ok" and comes back "yes". Left alone — it is VOX-020's function and its own gate
+        # only ever sees the answer to a read-back, where that costs nothing — but unbounded here it
+        # would exempt any echo with "book" or "looking" in it from the guard entirely. A real
+        # confirmation is short by nature, so the protection loses nothing by being short too.
+        answered_yes_or_no = (len(transcript.split()) <= 4
+                              and confirm.classify_response(transcript) != "unclear")
+        if (pending is not None and ECHO_GUARD and not answered_yes_or_no
+                and echo.echoes_reply(transcript, last_reply, ECHO_TEXT_OVERLAP,
+                                      tail_slack=ECHO_TEXT_TAIL_SLACK)):
+            turn.extra["self_echo_transcript"] = transcript
+            print("  that is the last reply coming back through the mic, not a turn — dropped. "
+                  "Headphones are the real fix; see docs/learning/vox-035-concepts.md")
+            return TurnResult(False, True, None)
+
         if not transcript:
             # Whisper returning empty on real audio is a provider problem, not a quiet user.
             print("empty transcript from STT — not calling the LLM.", file=sys.stderr)
@@ -399,8 +497,8 @@ def one_turn(chosen, pending=None, watch=False, idx=None, history=None):
 
     if watch and next_cap is None:
         print("nothing heard after the reply.")
-        return TurnResult(True, False, None)
-    return TurnResult(True, True, next_cap)
+        return TurnResult(True, False, None, reply.text)
+    return TurnResult(True, True, next_cap, reply.text)
 
 
 def grounding(reply, kb=True):
@@ -510,8 +608,14 @@ def main():
         print(f"history: last {history.turns.maxlen} turn(s) — a follow-up that refers back is "
               f"retrieved on the resolved question")
 
+    if ECHO_GUARD:
+        print(f"echo guard: on — a capture whose envelope matches the reply at r >= "
+              f"{ECHO_CORR_THRESHOLD:.2f} is treated as VOX hearing itself, not as a turn. "
+              f"This is not echo cancellation and headphones remain the real fix")
+
     spoken = 0
     pending = None
+    last_reply = None
     if history.enabled:
         _load_history(history)
         if history:
@@ -527,7 +631,7 @@ def main():
                   if budget.open() else "\n  time is up — one last reply to what you just said.")
         try:
             result = one_turn(chosen, pending=pending, watch=budget.watch(), idx=idx,
-                              history=history)
+                              history=history, last_reply=last_reply)
         except RateLimited as e:
             # Caught here and not inside the turn: a turn cannot decide the session is over, and
             # the wait is longer than a turn anyway. The turn record already carries the error,
@@ -542,6 +646,9 @@ def main():
             break
         spoken += 1 if result.spoken else 0
         pending = result.pending
+        # Kept when a turn produced none: a dropped echo turn has no reply of its own, and the reply
+        # still bouncing round the room is the one before it.
+        last_reply = result.reply or last_reply
         budget.took(quiet=not result.keep_going)
         if not result.keep_going:
             if not budget.timed:

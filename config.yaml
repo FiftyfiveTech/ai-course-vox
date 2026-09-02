@@ -35,3 +35,41 @@ barge_in:
   # silero hears Kokoro on open speakers. A stricter threshold reduces self-interrupts;
   # it does not fix speaker bleed. Run on headphones for reliable barge-in.
   speech_threshold: 0.7
+
+# --- self-echo guard (VOX-035) ----------------------------------------------------------------
+# For a machine running on open speakers, where silero hears Kokoro and the reply becomes the next
+# turn's input. Off by default and deliberately so: on headphones there is no echo to reject, and a
+# guard that *can* discard a real utterance does not belong in the demo path unasked. Every number
+# on the board was measured with this off.
+#
+#   VOX_ECHO_GUARD=1 make demo
+echo_guard:
+  enabled: false
+
+  # Pearson correlation between the mic's amplitude envelope and the reply's, at the best lag,
+  # above which the capture is treated as VOX hearing itself.
+  #
+  # 0.75 is where scripts/measure_echo_guard.py puts it on a synthetic room: over 700 ms of audio
+  # it keeps 95% of echo and loses 0% of real speech, and at 1.2 s the margin is 0.82 against 0.53.
+  # That is the mechanism working — it is not a value for your machine. A real speaker/mic pair is
+  # nonlinear and a real room has a tail the synthetic one does not, so tune it against a recording
+  # of the problem (the script's docstring says how) rather than against this comment.
+  corr_threshold: 0.75
+
+  # How far the echo may lag the reply: the output device buffer (0.182 s on the demo machine's
+  # MME device) plus the flight time across a room. The correlation searches out to here.
+  max_delay_ms: 500
+
+  # Second layer, after STT: fraction of the transcript's words that must also appear in the reply
+  # just spoken for the turn to be dropped as an echo that got past the envelope test.
+  text_overlap: 0.70
+
+  # The same layer's narrow rule, for the case a real run found: when the guard rearms near the end
+  # of a reply the residual capture is a handful of words — too short for the envelope test and too
+  # few words for text_overlap — and it came back as a turn. Such a capture is how the reply *ended*,
+  # so a word run that finishes within this many words of the reply's end is treated as echo.
+  #
+  # 1, not 2. Against a reply ending "...before two years of allotment", a slack of 2 makes "two
+  # years" a tail and costs a user their follow-up; at 1 it does not. Raising it catches more tails
+  # whose last words whisper dropped, and starts eating real utterances that quote the reply.
+  text_tail_slack: 1

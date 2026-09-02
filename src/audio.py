@@ -29,9 +29,16 @@ class Playback:
         self.pos = 0
         self.finished = threading.Event()
         self.stopped_t = None            # when abort() returned, or None if the reply played out
+        # When the device stopped pulling. Not the same as when the room went quiet: `out_latency_s`
+        # of buffer is still on its way out, and VOX-035's guard has to keep guarding through it.
+        self.finished_t = None
         self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32",
                                       callback=self._callback,
-                                      finished_callback=self.finished.set)
+                                      finished_callback=self._on_finished)
+
+    def _on_finished(self):
+        self.finished_t = time.perf_counter()
+        self.finished.set()
 
     def _callback(self, outdata, frames, time_info, status):
         if self.pos == 0 and self._on_first_audio is not None:
@@ -64,6 +71,24 @@ class Playback:
         is when VOX stopped *sending*, and this is the tail that can still be heard after it.
         """
         return round(float(self.stream.latency), 3)
+
+    def reference(self, seconds):
+        """The last `seconds` of what the device has actually pulled. -> float32 mono.
+
+        The far-end reference the self-echo guard correlates a mic capture against (VOX-035).
+        Bounded by `pos` and not by wall clock, so it is what was *emitted* rather than what was
+        queued — the same distinction `played_s` exists for, and the reason a guard built on this
+        needs no clock of its own.
+
+        Whether the reply is still playing at all is the caller's question, not this one's: after
+        `finished` there is nothing going to the speaker but the device buffer's tail, and
+        `speak_and_watch` stops consulting the guard there.
+        """
+        end = min(self.pos, len(self.samples))
+        if end <= 0:
+            return np.zeros(0, dtype="float32")
+        start = max(0, end - int(seconds * self.sample_rate))
+        return self.samples[start:end, 0]
 
     def start(self):
         self.stream.start()
