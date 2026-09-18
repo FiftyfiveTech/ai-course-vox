@@ -205,7 +205,7 @@ to change it.
 # --- credentials (no defaults; a MISSING one stops the turn, it does not fall back) ------------
 HF_TOKEN=                       # only for gated repos; the pinned tokenizer mirror needs none
 GROQ_API_KEY=                   # STT default + the LLM default and 2 more  https://console.groq.com
-NVIDIA_API_KEY=                 # the gpt-oss-20b-nim arm only           https://build.nvidia.com
+NVIDIA_API_KEY=                 # the nemotron-120b-nim arm only         https://build.nvidia.com
 
 # --- arm selection: alias, HF repo id, or repo/id@provider. A CLI flag beats the env ----------
 VOX_STT_MODEL=                  # default openai/whisper-large-v3-turbo     (alias: turbo)
@@ -266,7 +266,7 @@ arm on an existing runtime is a table row and no new code.
 | STT | `openai/whisper-base` | local | `transformers-whisper` | `whisper-base` |
 | STT | `Systran/faster-whisper-base` | local | `faster-whisper` | `faster-base` **(fallback)** |
 | LLM | `openai/gpt-oss-120b` | Groq free tier | `openai-chat` | `gpt-oss` **(default)** |
-| LLM | `openai/gpt-oss-20b` | NVIDIA NIM free tier | `openai-chat` | `gpt-oss-20b-nim` |
+| LLM | `nvidia/nemotron-3-super-120b-a12b` | NVIDIA NIM free tier | `openai-chat` | `nemotron-120b-nim` |
 | LLM | `Qwen/Qwen3.8-27B` | Groq free tier | `openai-chat` | `qwen3.8` |
 | LLM | `openai/gpt-oss-20b` | Groq free tier | `openai-chat` | `gpt-oss-20b` |
 | LLM | `hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF` | local, via ollama | `ollama-chat` | `llama-3.2-3b` **(fallback)** |

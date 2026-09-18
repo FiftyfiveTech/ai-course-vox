@@ -138,17 +138,26 @@ LLM_ARMS = (
         request={"reasoning_effort": "low"}),
     # 2026-09-18: NIM retired `openai/gpt-oss-120b` outright — gone from the catalogue, not just
     # renamed (`uv run python scripts/preflight.py` caught it before a session did, the same way
-    # it caught the two Llama arms above). NIM's remaining catalogue has no other `openai/gpt-oss`
-    # size but the 20B, so the cross-provider pair below moves to that checkpoint: same family,
-    # same `reasoning_effort` quirk, just smaller. That leaves `gpt-oss` (120B, groq) with no
-    # cross-provider fallback of its own again — re-pointing that is its own decision, not folded
-    # into this fix.
-    #
-    # `resolve()` refuses a bare `openai/gpt-oss-20b` now that two providers serve it, which is the
-    # behaviour it already documented; name an arm by alias or by `repo_id@provider`.
-    Arm(repo_id="openai/gpt-oss-20b", provider="nvidia-nim",
-        provider_model="openai/gpt-oss-20b", backend="openai-chat", alias="gpt-oss-20b-nim",
-        api_base=NIM, key_env="NVIDIA_API_KEY", request={"reasoning_effort": "low"}),
+    # it caught the two Llama arms above). The first patch pointed this row at `openai/gpt-oss-20b`,
+    # the only other size NIM still served — but that gave up on the "same weights on the other
+    # free tier" shape entirely, since 20B is a different checkpoint from the 120B default.
+    # `nvidia/nemotron-3-super-120b-a12b` is the closer match instead: 120B total / 12B active MoE
+    # on NIM's own catalogue, same total-parameter class as the groq default, though a different
+    # model family. It is a reasoning model too, and by default it thinks unboundedly the same way
+    # gpt-oss did before `reasoning_effort` — measured 2026-09-18: a real call with the actual
+    # system prompt timed out past REMOTE_TIMEOUT_S (10 s), and a raw 200-token call spent all of
+    # them on `reasoning_content` and never reached an answer. Nemotron has no `reasoning_effort`
+    # field; `chat_template_kwargs: {"thinking": false}` is what turns it off here — confirmed over
+    # two direct calls at 1035 ms and 1672 ms with `reasoning_content` empty both times, then again
+    # through the real pipeline (`scripts/check_arms.py --stage llm`) at 2560 ms, cost $0.00 either
+    # way — still the free tier, no billing surface on this key.
+    # This still leaves `gpt-oss` (120B, groq) without a same-weights fallback — no free-tier
+    # provider serves that checkpoint but Groq — which is the actual gap, not something this row
+    # can close by itself.
+    Arm(repo_id="nvidia/nemotron-3-super-120b-a12b", provider="nvidia-nim",
+        provider_model="nvidia/nemotron-3-super-120b-a12b", backend="openai-chat",
+        alias="nemotron-120b-nim", api_base=NIM, key_env="NVIDIA_API_KEY",
+        request={"chat_template_kwargs": {"thinking": False}}),
     # The fastest arm measured on either free tier — 259 ms and 272 ms, 16 tokens, and no
     # `reasoning_effort` needed because it does not narrate its thinking into `content` the way
     # `qwen/qwen3.6-27b` does. Kept as the cross-family contrast the 70B row used to provide.
