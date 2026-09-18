@@ -136,17 +136,18 @@ LLM_ARMS = (
     Arm(repo_id="openai/gpt-oss-120b", provider="groq", provider_model="openai/gpt-oss-120b",
         backend="openai-chat", alias="gpt-oss", api_base=GROQ, key_env="GROQ_API_KEY",
         request={"reasoning_effort": "low"}),
-    # The same weights on the other free tier, which is why this row exists rather than a different
-    # model on NIM: the arm table's job at this stage is to make one variable movable at a time, and
-    # holding the model fixed makes the provider the only difference between this row and the one
-    # above. 1766 ms and 5801 ms against Groq's 312-555 ms, so this is the slow leg, not a spare
-    # default. It also keeps the stage on two providers — a single-provider stage is what made a
-    # model retirement stop a session instead of costing it one arm.
+    # 2026-09-18: NIM retired `openai/gpt-oss-120b` outright — gone from the catalogue, not just
+    # renamed (`uv run python scripts/preflight.py` caught it before a session did, the same way
+    # it caught the two Llama arms above). NIM's remaining catalogue has no other `openai/gpt-oss`
+    # size but the 20B, so the cross-provider pair below moves to that checkpoint: same family,
+    # same `reasoning_effort` quirk, just smaller. That leaves `gpt-oss` (120B, groq) with no
+    # cross-provider fallback of its own again — re-pointing that is its own decision, not folded
+    # into this fix.
     #
-    # `resolve()` refuses a bare `openai/gpt-oss-120b` now that two providers serve it, which is the
+    # `resolve()` refuses a bare `openai/gpt-oss-20b` now that two providers serve it, which is the
     # behaviour it already documented; name an arm by alias or by `repo_id@provider`.
-    Arm(repo_id="openai/gpt-oss-120b", provider="nvidia-nim",
-        provider_model="openai/gpt-oss-120b", backend="openai-chat", alias="gpt-oss-nim",
+    Arm(repo_id="openai/gpt-oss-20b", provider="nvidia-nim",
+        provider_model="openai/gpt-oss-20b", backend="openai-chat", alias="gpt-oss-20b-nim",
         api_base=NIM, key_env="NVIDIA_API_KEY", request={"reasoning_effort": "low"}),
     # The fastest arm measured on either free tier — 259 ms and 272 ms, 16 tokens, and no
     # `reasoning_effort` needed because it does not narrate its thinking into `content` the way
